@@ -203,18 +203,33 @@ export default function App() {
 
   // 2. Load and save states from LocalStorage
   useEffect(() => {
+    let initialExaminee = {
+      name: "",
+      dept: "",
+      idNo: "",
+      date: new Date().toISOString().split('T')[0]
+    };
+
     const savedInfo = localStorage.getItem("haccp_examinee_info");
     if (savedInfo) {
       try {
         const parsed = JSON.parse(savedInfo);
-        setExaminee({
+        initialExaminee = {
+          ...initialExaminee,
           ...parsed,
           name: "" // Always blank on start screen
-        });
+        };
       } catch (e) {
         console.error(e);
       }
     }
+
+    if (!initialExaminee.idNo) {
+      const randomNum = Math.floor(1000 + Math.random() * 9000);
+      initialExaminee.idNo = `HS-2026-${randomNum}`;
+    }
+
+    setExaminee(initialExaminee);
 
     const savedHistory = localStorage.getItem("haccp_exam_history");
     if (savedHistory) {
@@ -224,16 +239,6 @@ export default function App() {
         console.error(e);
       }
     }
-    
-    // Auto-generate examinee ID if empty
-    setExaminee(prev => {
-      const randomNum = Math.floor(1000 + Math.random() * 9000);
-      return {
-        ...prev,
-        idNo: prev.idNo || `HS-2026-${randomNum}`,
-        name: "" // Always empty on start screen
-      };
-    });
   }, []);
 
   // 3. Timer Effect
@@ -441,6 +446,10 @@ export default function App() {
     setIsExamStarted(false);
     setIsSubmitted(false);
     setAnswers({});
+    setExaminee(prev => ({
+      ...prev,
+      name: "" // Ensure name is cleared/blank when returning to start screen
+    }));
   };
 
   // Format Time
