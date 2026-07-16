@@ -1362,7 +1362,7 @@ export default function App() {
                                   {idx + 1}.
                                 </div>
                                 <div className="space-y-2 w-full">
-                                  <h3 className="font-serif font-bold text-stone-900 text-sm md:text-base leading-relaxed">
+                                  <h3 className="font-serif font-bold text-stone-900 text-sm md:text-base leading-relaxed whitespace-pre-line">
                                     {q.text}
                                     <span className="text-stone-400 ml-1 font-sans text-xs">
                                       {answers[q.id] ? `( ${answers[q.id]} )` : '(  )'}
@@ -1483,7 +1483,7 @@ export default function App() {
 
                         return (
                           <div className="flex-1 flex flex-col">
-                            <h3 className="font-serif font-bold text-stone-900 text-base md:text-lg leading-relaxed mb-3">
+                            <h3 className="font-serif font-bold text-stone-900 text-base md:text-lg leading-relaxed mb-3 whitespace-pre-line">
                               {currentCardIndex + 1}. {q.text}
                             </h3>
 
