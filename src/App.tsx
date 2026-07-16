@@ -73,6 +73,16 @@ interface ExamHistory {
   answers?: Record<number, number>;
 }
 
+// Helper to shuffle array
+const shuffleArray = <T,>(array: T[]): T[] => {
+  const arr = [...array];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+};
+
 export default function App() {
   // 1. App States
   const [examinee, setExaminee] = useState<ExamineeInfo>({
@@ -87,6 +97,7 @@ export default function App() {
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [quizMode, setQuizMode] = useState<'paper' | 'card'>('paper');
   const [currentCardIndex, setCurrentCardIndex] = useState(0);
+  const [shuffledQuestions, setShuffledQuestions] = useState<Question[]>(haccpQuestions);
   
   // Timer States
   const [secondsElapsed, setSecondsElapsed] = useState(0);
@@ -254,6 +265,7 @@ export default function App() {
     setSecondsElapsed(0);
     setIsSubmitted(false);
     setCurrentCardIndex(0);
+    setShuffledQuestions(shuffleArray(haccpQuestions));
     setIsExamStarted(true);
     setIsTimerRunning(true);
   };
@@ -1314,7 +1326,7 @@ export default function App() {
 
                       {/* QUESTIONS LIST */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-10">
-                        {haccpQuestions.map((q, idx) => {
+                        {shuffledQuestions.map((q, idx) => {
                           const isCorrect = answers[q.id] === q.correctAnswer;
                           const hasAnswered = answers[q.id] !== undefined;
 
@@ -1333,7 +1345,7 @@ export default function App() {
                               <div className="flex items-start gap-2.5">
                                 {/* Question Title */}
                                 <div className="font-serif font-bold text-stone-900 text-sm md:text-base whitespace-nowrap pt-0.5">
-                                  {q.id}.
+                                  {idx + 1}.
                                 </div>
                                 <div className="space-y-2 w-full">
                                   <h3 className="font-serif font-bold text-stone-900 text-sm md:text-base leading-relaxed">
@@ -1451,14 +1463,14 @@ export default function App() {
 
                       {/* Render Current Single Question Card */}
                       {(() => {
-                        const q = haccpQuestions[currentCardIndex];
+                        const q = shuffledQuestions[currentCardIndex];
                         const isCorrect = answers[q.id] === q.correctAnswer;
                         const hasAnswered = answers[q.id] !== undefined;
 
                         return (
                           <div className="flex-1 flex flex-col">
                             <h3 className="font-serif font-bold text-stone-900 text-base md:text-lg leading-relaxed mb-3">
-                              {q.id}. {q.text}
+                              {currentCardIndex + 1}. {q.text}
                             </h3>
 
                             {/* Context Situation */}
@@ -1546,7 +1558,7 @@ export default function App() {
                                 {currentCardIndex + 1} / 20
                               </span>
 
-                              {currentCardIndex < haccpQuestions.length - 1 ? (
+                              {currentCardIndex < shuffledQuestions.length - 1 ? (
                                 <button
                                   type="button"
                                   onClick={() => setCurrentCardIndex(prev => prev + 1)}
@@ -1615,7 +1627,7 @@ export default function App() {
 
                     {/* OMR Questions Container */}
                     <div className="flex-1 overflow-y-auto space-y-2.5 max-h-[450px] pr-1 scrollbar-thin">
-                      {haccpQuestions.map(q => {
+                      {shuffledQuestions.map((q, idx) => {
                         const selectedNum = answers[q.id];
                         const isCorrect = answers[q.id] === q.correctAnswer;
 
@@ -1624,20 +1636,20 @@ export default function App() {
                             key={q.id} 
                             onClick={() => {
                               if (quizMode === 'card') {
-                                setCurrentCardIndex(q.id - 1);
+                                setCurrentCardIndex(idx);
                               } else {
                                 const el = document.getElementById(`q-paper-${q.id}`);
                                 el?.scrollIntoView({ behavior: 'smooth' });
                               }
                             }}
                             className={`flex items-center justify-between p-1.5 rounded-lg text-xs transition-all cursor-pointer ${
-                              quizMode === 'card' && currentCardIndex === q.id - 1
+                              quizMode === 'card' && currentCardIndex === idx
                                 ? 'bg-amber-50/50 border border-amber-200' 
                                 : 'hover:bg-stone-50 border border-transparent'
                             }`}
                           >
                             <span className="w-6 font-mono font-bold text-stone-500 text-center">
-                              {q.id.toString().padStart(2, '0')}
+                              {(idx + 1).toString().padStart(2, '0')}
                             </span>
                             
                             <div className="flex gap-1.5">
