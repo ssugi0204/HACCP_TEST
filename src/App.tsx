@@ -265,7 +265,7 @@ export default function App() {
     setSecondsElapsed(0);
     setIsSubmitted(false);
     setCurrentCardIndex(0);
-    setShuffledQuestions(shuffleArray(haccpQuestions));
+    setShuffledQuestions(haccpQuestions);
     setIsExamStarted(true);
     setIsTimerRunning(true);
   };
@@ -1357,7 +1357,7 @@ export default function App() {
 
                                   {/* Optional context box (Q7 or Q20) */}
                                   {q.context && (
-                                    <div className="bg-[#FFFDF3] border-l-3 border-amber-500 p-3 text-xs text-stone-700 rounded-r-lg my-2 font-serif leading-relaxed italic">
+                                    <div className="bg-[#FFFDF3] border-l-3 border-amber-500 p-3 text-xs text-stone-700 rounded-r-lg my-2 font-serif leading-relaxed italic whitespace-pre-wrap">
                                       {q.context}
                                     </div>
                                   )}
@@ -1475,7 +1475,7 @@ export default function App() {
 
                             {/* Context Situation */}
                             {q.context && (
-                              <div className="bg-[#FFFDF3] border-l-4 border-amber-500 p-4 text-xs md:text-sm text-stone-700 rounded-r-xl my-3 font-serif leading-relaxed italic">
+                              <div className="bg-[#FFFDF3] border-l-4 border-amber-500 p-4 text-xs md:text-sm text-stone-700 rounded-r-xl my-3 font-serif leading-relaxed italic whitespace-pre-wrap">
                                 {q.context}
                               </div>
                             )}
