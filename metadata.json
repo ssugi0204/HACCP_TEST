@@ -1,0 +1,6 @@
+{
+  "name": "국순당 횡성양조장 HACCP 내부평가",
+  "description": "국순당 횡성양조장 임직원들을 위한 HACCP 내부평가 온라인 시험 시스템입니다. 깔끔한 시험지 디자인과 모바일 반응형 레이아웃을 제공합니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
