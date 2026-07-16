@@ -206,7 +206,11 @@ export default function App() {
     const savedInfo = localStorage.getItem("haccp_examinee_info");
     if (savedInfo) {
       try {
-        setExaminee(JSON.parse(savedInfo));
+        const parsed = JSON.parse(savedInfo);
+        setExaminee({
+          ...parsed,
+          name: "" // Always blank on start screen
+        });
       } catch (e) {
         console.error(e);
       }
@@ -223,11 +227,12 @@ export default function App() {
     
     // Auto-generate examinee ID if empty
     setExaminee(prev => {
-      if (!prev.idNo) {
-        const randomNum = Math.floor(1000 + Math.random() * 9000);
-        return { ...prev, idNo: `HS-2026-${randomNum}` };
-      }
-      return prev;
+      const randomNum = Math.floor(1000 + Math.random() * 9000);
+      return {
+        ...prev,
+        idNo: prev.idNo || `HS-2026-${randomNum}`,
+        name: "" // Always empty on start screen
+      };
     });
   }, []);
 
