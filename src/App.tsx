@@ -27,10 +27,14 @@ import {
   Lock,
   FileSpreadsheet,
   ChevronDown,
-  Home
+  Home,
+  QrCode,
+  Copy
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { haccpQuestions, Question } from "./data/questions";
+import { collection, addDoc, onSnapshot, query, orderBy, Timestamp, deleteDoc, doc } from "firebase/firestore";
+import { db } from "./lib/firebase";
 
 // Custom Kooksoondang Logo SVG/HTML Component (High-fidelity corporate brand design)
 const KooksoondangLogo = ({ className = "" }: { className?: string }) => (
@@ -62,8 +66,10 @@ interface ExamineeInfo {
   date: string;
 }
 
-// History record for local storage
+// History record for local storage and Firestore
 interface ExamHistory {
+  id?: string;
+  createdAt?: any;
   date: string;
   score: number;
   passed: boolean;
@@ -107,6 +113,8 @@ export default function App() {
   const [showCheatSheet, setShowCheatSheet] = useState(false);
   const [showOMRModalMobile, setShowOMRModalMobile] = useState(false);
   const [examHistory, setExamHistory] = useState<ExamHistory[]>([]);
+  const [firebaseError, setFirebaseError] = useState<string | null>(null);
+  const [myLocalExamRecord, setMyLocalExamRecord] = useState<ExamHistory | null>(null);
   const [activeTab, setActiveTab] = useState<'exam' | 'history'>('exam');
   const [showSubmitConfirmModal, setShowSubmitConfirmModal] = useState(false);
   const [startExamError, setStartExamError] = useState<string | null>(null);
@@ -114,6 +122,18 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<'all' | 'passed' | 'reexam' | 'retrain'>('all');
   const [dummyCountInput, setDummyCountInput] = useState<string>("5");
+
+  // QR Code 공유 모달 상태
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [qrUrl, setQrUrl] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  // 현재 브라우저 URL로 QR URL 초기화
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setQrUrl(window.location.href);
+    }
+  }, []);
 
   const passingScoreThreshold = 70; // 70 points out of 100 (14 correct answers)
 
@@ -231,7 +251,16 @@ export default function App() {
 
     setExaminee(initialExaminee);
 
-    const savedHistory = localStorage.getItem("haccp_exam_history");
+    const savedLocalRecord = localStorage.getItem("my_haccp_exam_record");
+    if (savedLocalRecord) {
+      try {
+        setMyLocalExamRecord(JSON.parse(savedLocalRecord));
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    const savedHistory = localStorage.getItem("haccp_exam_history_admin");
     if (savedHistory) {
       try {
         setExamHistory(JSON.parse(savedHistory));
@@ -239,6 +268,22 @@ export default function App() {
         console.error(e);
       }
     }
+
+    const q = query(collection(db, "exam_history"), orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const historyData: ExamHistory[] = [];
+      snapshot.forEach((doc) => {
+        historyData.push({ id: doc.id, ...doc.data() } as ExamHistory);
+      });
+      setExamHistory(historyData);
+      setFirebaseError(null);
+      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(historyData));
+    }, (error) => {
+      console.error("Firestore onSnapshot error:", error);
+      setFirebaseError(error.code || "error");
+    });
+
+    return () => unsubscribe();
   }, []);
 
   // 3. Timer Effect
@@ -293,12 +338,12 @@ export default function App() {
     setShowSubmitConfirmModal(true);
   };
 
-  const handleConfirmSubmit = () => {
+  const handleConfirmSubmit = async () => {
     setShowSubmitConfirmModal(false);
     setIsSubmitted(true);
     setIsTimerRunning(false);
     
-    // Add to history
+    // Add to history in Firestore
     const newRecord: ExamHistory = {
       date: new Date().toISOString().split('T')[0],
       score: finalScore,
@@ -306,12 +351,28 @@ export default function App() {
       name: examinee.name,
       dept: examinee.dept,
       idNo: examinee.idNo,
-      answers: { ...answers }
+      answers: { ...answers },
+      createdAt: Timestamp.now()
     };
     
-    const updatedHistory = [newRecord, ...examHistory];
-    setExamHistory(updatedHistory);
-    localStorage.setItem("haccp_exam_history", JSON.stringify(updatedHistory));
+    try {
+      await addDoc(collection(db, "exam_history"), newRecord);
+    } catch (e: any) {
+      console.error("Error adding document: ", e);
+      if (e.code === 'permission-denied') {
+        alert("데이터베이스 쓰기 권한이 없습니다. Firebase 콘솔에서 Firestore 규칙(Rules)을 확인해주세요.");
+      } else {
+        alert("시험 결과 저장에 실패했습니다: " + e.message);
+      }
+      // Fallback: manually update local state and storage
+      const updatedHistory = [newRecord, ...examHistory];
+      setExamHistory(updatedHistory);
+      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
+    }
+    
+    // Save to local state and storage
+    setMyLocalExamRecord(newRecord);
+    localStorage.setItem("my_haccp_exam_record", JSON.stringify(newRecord));
     
     // Scroll to top to see result
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -358,23 +419,50 @@ export default function App() {
         name: name,
         dept: dept,
         idNo: `HS-2026-${randomId}`,
-        answers: mockAnswers
+        answers: mockAnswers,
+        createdAt: Timestamp.fromDate(dateObj)
       });
     }
 
-    const sortedSamples = [...newSamples].sort((a, b) => b.date.localeCompare(a.date));
-    const updatedHistory = [...sortedSamples, ...examHistory];
-    
-    setExamHistory(updatedHistory);
-    // localdb에 저장
-    localStorage.setItem("haccp_exam_history", JSON.stringify(updatedHistory));
-    alert(`성공적으로 더미 데이터 ${count}건이 생성되어 LocalDB(localStorage)에 저장되었습니다.`);
+    let errorOccurred = false;
+    newSamples.forEach(async (sample) => {
+      try {
+        await addDoc(collection(db, "exam_history"), sample);
+      } catch (e) {
+        console.error("Error adding sample document: ", e);
+        errorOccurred = true;
+      }
+    });
+
+    if (errorOccurred) {
+      const sortedSamples = [...newSamples].sort((a, b) => b.date.localeCompare(a.date));
+      const updatedHistory = [...sortedSamples, ...examHistory];
+      setExamHistory(updatedHistory);
+      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
+      alert(`Firestore 권한 오류로 인해 더미 데이터 ${count}건이 로컬 저장소에 저장되었습니다.`);
+    } else {
+      alert(`성공적으로 더미 데이터 ${count}건이 생성되어 Firestore에 저장 중입니다.`);
+    }
   };
 
   const handleClearHistory = () => {
-    if (window.confirm("모든 응시 이력을 정말 삭제하시겠습니까?")) {
-      localStorage.removeItem("haccp_exam_history");
-      setExamHistory([]);
+    if (window.confirm("모든 응시 이력을 정말 삭제하시겠습니까? (Firestore에서 모두 삭제됩니다)")) {
+      let errorOccurred = false;
+      examHistory.forEach(async (record) => {
+        if (record.id) {
+          try {
+            await deleteDoc(doc(db, "exam_history", record.id));
+          } catch (e) {
+            console.error("Error deleting document: ", e);
+            errorOccurred = true;
+          }
+        }
+      });
+      // Fallback
+      if (errorOccurred) {
+        localStorage.removeItem("haccp_exam_history_admin");
+        setExamHistory([]);
+      }
     }
   };
 
@@ -480,17 +568,6 @@ export default function App() {
 
           <div className="flex items-center gap-3">
             <button
-              onClick={() => setActiveTab(activeTab === 'exam' ? 'history' : 'exam')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                activeTab === 'history' 
-                  ? 'bg-emerald-800 text-white' 
-                  : 'text-stone-600 hover:bg-stone-100'
-              }`}
-            >
-              <History size={14} />
-              이력 {examHistory.length > 0 && `(${examHistory.length})`}
-            </button>
-            <button
               onClick={() => setShowCheatSheet(!showCheatSheet)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-stone-600 hover:bg-stone-100 border border-stone-200 transition-colors"
             >
@@ -595,6 +672,42 @@ export default function App() {
                 </button>
               </div>
             </div>
+
+            {firebaseError && (
+              <div className="bg-red-50 border border-red-200 rounded-2xl p-5 text-red-950 text-xs md:text-sm leading-relaxed space-y-2">
+                <div className="flex items-center gap-2 font-bold text-red-850">
+                  <AlertTriangle size={18} className="text-red-600 shrink-0" />
+                  <span>실시간 데이터베이스 연동 오류 (해결 조치 필요)</span>
+                </div>
+                <p>
+                  현재 Firebase Firestore 데이터베이스 연결 또는 권한에 문제가 있어, 다른 기기(모바일 QR 등)에서 응시한 결과가 이 관리자 화면에 동기화되지 않고 있습니다. 
+                  (현재 화면에는 임시로 로컬 브라우저 저장소 데이터만 표시됩니다.)
+                </p>
+                <div className="bg-white/80 p-3.5 rounded-xl border border-red-100 mt-2 space-y-1.5 text-stone-800 font-sans">
+                  <p className="font-bold text-stone-900">해결 방법 (간단한 2가지 확인 사항):</p>
+                  <ol className="list-decimal list-inside space-y-1.5">
+                    <li>
+                      <strong className="text-emerald-800">Firestore Database 생성 여부 확인:</strong><br />
+                      Firebase 콘솔(<a href="https://console.firebase.google.com/" target="_blank" rel="noreferrer" className="text-blue-600 underline">https://console.firebase.google.com/</a>)에서 <strong className="text-stone-900">haccp-af46f</strong> 프로젝트를 선택하고, 좌측 메뉴에서 <strong className="text-stone-900">Build &gt; Firestore Database</strong>를 클릭한 후 데이터베이스가 생성되어 있는지 확인해 주세요. (생성되어 있지 않다면 "데이터베이스 만들기"를 클릭해 생성해야 합니다.)
+                    </li>
+                    <li>
+                      <strong className="text-emerald-800">보안 규칙(Rules) 수정:</strong><br />
+                      Firestore Database의 <strong className="text-stone-900">규칙(Rules)</strong> 탭으로 이동하여 기본 규칙을 아래와 같이 모든 읽기/쓰기가 가능하도록 수정하고 <strong className="text-stone-900">게시(Publish)</strong> 버튼을 눌러주세요:
+                    </li>
+                  </ol>
+                  <pre className="bg-stone-900 text-stone-100 p-3 rounded-lg text-xs font-mono overflow-x-auto mt-2 select-all leading-normal">
+{`rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}`}
+                  </pre>
+                </div>
+              </div>
+            )}
 
             {/* 2. Admin Stats Grid */}
             {(() => {
@@ -852,106 +965,6 @@ export default function App() {
               );
             })()}
           </div>
-        ) : activeTab === 'history' ? (
-          <div className="bg-white rounded-2xl shadow-xs border border-stone-200 p-6 max-w-2xl mx-auto w-full">
-            <div className="flex items-center justify-between mb-6">
-              <div className="flex items-center gap-2">
-                <History className="text-emerald-800" size={24} />
-                <h2 className="text-lg font-serif font-bold text-stone-900">내부평가 시험 응시 이력</h2>
-              </div>
-            </div>
-
-            {/* 더미 데이터 생성 도구 */}
-            <div className="bg-stone-50 rounded-xl p-4 border border-stone-200 mb-6 space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 text-stone-700">
-                  <Plus className="text-emerald-800 shrink-0" size={16} />
-                  <span className="text-xs font-bold font-sans">테스트용 더미 데이터 입력기 (LocalDB 저장)</span>
-                </div>
-                <span className="text-[10px] bg-stone-200 text-stone-600 px-2 py-0.5 rounded-md font-mono self-start sm:self-center">
-                  LocalDB Storage Active
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2.5">
-                <div className="flex items-center gap-1.5 bg-white border border-stone-250 rounded-xl px-3 py-1.5 shrink-0">
-                  <span className="text-xs text-stone-500 shrink-0 font-medium">생성할 개수:</span>
-                  <input
-                    type="number"
-                    min="1"
-                    max="100"
-                    value={dummyCountInput}
-                    onChange={(e) => setDummyCountInput(e.target.value)}
-                    className="w-16 text-xs font-mono font-bold focus:outline-hidden text-stone-800 border-b border-transparent focus:border-stone-300"
-                    placeholder="5"
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const count = parseInt(dummyCountInput, 10);
-                    if (isNaN(count) || count <= 0) {
-                      alert("1 이상의 올바른 숫자를 입력해 주세요.");
-                      return;
-                    }
-                    handleAddSampleDataOfCount(count);
-                  }}
-                  className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1 cursor-pointer whitespace-nowrap"
-                >
-                  더미 데이터 생성
-                </button>
-                {examHistory.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={handleClearHistory}
-                    className="px-3 py-2 bg-red-50 hover:bg-red-100 text-red-600 border border-red-100 text-xs font-bold rounded-xl transition-all flex items-center gap-1 cursor-pointer whitespace-nowrap"
-                  >
-                    <Trash2 size={13} />
-                    전체 초기화
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {examHistory.length === 0 ? (
-              <div className="text-center py-12 text-stone-400">
-                <GraduationCap className="mx-auto mb-3 text-stone-300" size={48} />
-                <p className="text-sm">아직 응시한 이력이 없습니다.</p>
-                <p className="text-xs mt-1">HACCP 시험을 풀고 점수를 확인해 보세요.</p>
-                <button
-                  onClick={() => setActiveTab('exam')}
-                  className="mt-4 px-4 py-2 bg-[#0F5A3E] text-white text-xs font-semibold rounded-lg hover:bg-emerald-800 transition-colors"
-                >
-                  시험 보러 가기
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2">
-                {examHistory.map((record, idx) => (
-                  <div key={idx} className="flex items-center justify-between p-4 bg-stone-50 rounded-xl border border-stone-150">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-sm text-stone-800">{record.name} ({record.dept})</span>
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                          record.score >= 70 
-                            ? 'bg-emerald-55 text-emerald-800 border border-emerald-100' 
-                            : record.score >= 50 
-                              ? 'bg-amber-55 text-amber-800 border border-amber-100' 
-                              : 'bg-red-50 text-red-700 border border-red-100'
-                        }`}>
-                          {record.score >= 70 ? '합격' : record.score >= 50 ? '재평가' : '재교육+재평가'}
-                        </span>
-                      </div>
-                      <span className="text-xs text-stone-400 block mt-1">응시일: {record.date}</span>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-lg font-mono font-bold text-[#0F5A3E]">{record.score}점</span>
-                      <span className="text-xs text-stone-400 block">100점 만점</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
         ) : (
           /* ----------------- TAB: EXAM CORE ----------------- */
           <>
@@ -962,11 +975,10 @@ export default function App() {
                   <div className="absolute inset-0 bg-[radial-gradient(#ffffff08_1px,transparent_1px)] [background-size:16px_16px] opacity-60" />
                   <div 
                     onClick={handleKooksoondangClick}
-                    className="cursor-pointer select-none group"
-                    title="관리자 인증 (국순당 클릭 후 5초 이내 1234 입력)"
+                    className="select-none"
                   >
-                    <KooksoondangLogo className="justify-center text-white mb-4 filter brightness-0 invert group-hover:opacity-85 transition-opacity" />
-                    <h1 className="font-serif font-bold text-2xl tracking-tight group-hover:text-emerald-100 transition-colors">
+                    <KooksoondangLogo className="justify-center text-white mb-4 filter brightness-0 invert transition-opacity" />
+                    <h1 className="font-serif font-bold text-2xl tracking-tight transition-colors">
                       국순당 횡성양조장
                     </h1>
                   </div>
@@ -976,7 +988,7 @@ export default function App() {
                   </p>
                 </div>
 
-                {examHistory.length > 0 ? (
+                {myLocalExamRecord !== null ? (
                   <div className="p-6 md:p-8 space-y-6">
                     <div className="bg-red-50 text-red-800 text-xs p-4 rounded-xl border border-red-100 flex items-start gap-2.5 leading-relaxed">
                       <AlertTriangle className="text-red-600 shrink-0 mt-0.5" size={18} />
@@ -1000,52 +1012,43 @@ export default function App() {
                       <div className="grid grid-cols-2 gap-y-2.5 gap-x-4 text-xs text-stone-600">
                         <div>
                           <span className="text-stone-400 block font-medium">성명</span>
-                          <span className="font-semibold text-stone-800 text-sm">{examHistory[0].name}</span>
+                          <span className="font-semibold text-stone-800 text-sm">{myLocalExamRecord.name}</span>
                         </div>
                         <div>
                           <span className="text-stone-400 block font-medium">소속 부서 / 팀</span>
-                          <span className="font-semibold text-stone-800 text-sm">{examHistory[0].dept}</span>
+                          <span className="font-semibold text-stone-800 text-sm">{myLocalExamRecord.dept}</span>
                         </div>
                         <div>
                           <span className="text-stone-400 block font-medium">수험 번호</span>
-                          <span className="font-mono text-stone-700">{examHistory[0].idNo || 'HS-2026-7713'}</span>
+                          <span className="font-mono text-stone-700">{myLocalExamRecord.idNo || 'HS-2026-7713'}</span>
                         </div>
                         <div>
                           <span className="text-stone-400 block font-medium">평가 완료일</span>
-                          <span className="text-stone-700">{examHistory[0].date}</span>
+                          <span className="text-stone-700">{myLocalExamRecord.date}</span>
                         </div>
                         <div className="col-span-2 border-t border-stone-150 pt-2.5 mt-1 flex justify-between items-center">
                           <div>
                             <span className="text-stone-400 block font-medium">종합 평가 결과</span>
-                            <span className={`text-lg font-bold ${examHistory[0].score >= 70 ? 'text-emerald-800' : examHistory[0].score >= 50 ? 'text-amber-700' : 'text-red-600'}`}>
-                              {examHistory[0].score}점 ({examHistory[0].score >= 70 ? '합격' : examHistory[0].score >= 50 ? '재시험' : '재교육'})
+                            <span className={`text-lg font-bold ${myLocalExamRecord.score >= 70 ? 'text-emerald-800' : myLocalExamRecord.score >= 50 ? 'text-amber-700' : 'text-red-600'}`}>
+                              {myLocalExamRecord.score}점 ({myLocalExamRecord.score >= 70 ? '합격' : myLocalExamRecord.score >= 50 ? '재시험' : '재교육'})
                             </span>
                           </div>
                           
                           {/* Circle Stamp */}
                           <div className={`w-14 h-14 rounded-full border-2 ${
-                            examHistory[0].score >= 70 
+                            myLocalExamRecord.score >= 70 
                               ? 'border-emerald-600 text-emerald-700 bg-emerald-50/50' 
-                              : examHistory[0].score >= 50 
+                              : myLocalExamRecord.score >= 50 
                                 ? 'border-amber-600 text-amber-700 bg-amber-50/50' 
                                 : 'border-red-600 text-red-700 bg-red-50/50'
                           } flex flex-col items-center justify-center font-bold text-[11px] rotate-12 shrink-0 shadow-xs`}>
                             <span className="scale-90 font-extrabold font-sans">
-                              {examHistory[0].score >= 70 ? '합격' : examHistory[0].score >= 50 ? '재시험' : '재교육'}
+                              {myLocalExamRecord.score >= 70 ? '합격' : myLocalExamRecord.score >= 50 ? '재시험' : '재교육'}
                             </span>
                           </div>
                         </div>
                       </div>
                     </div>
-
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab('history')}
-                      className="w-full py-3 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer border border-stone-200"
-                    >
-                      <History size={16} />
-                      전체 응시 이력 목록 확인하기
-                    </button>
                   </div>
                 ) : (
                   <form onSubmit={handleStartExam} className="p-6 md:p-8 space-y-5">
@@ -1140,6 +1143,23 @@ export default function App() {
                       <FileText size={18} />
                       HACCP 내부평가 시험 시작
                     </button>
+
+                    <div className="pt-2.5 border-t border-stone-150 flex justify-center">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (typeof window !== "undefined") {
+                            // If running in an iframe, the host might want the parent location or can override it
+                            setQrUrl(window.location.href);
+                          }
+                          setShowQrModal(true);
+                        }}
+                        className="flex items-center gap-1.5 text-xs text-[#0F5A3E] hover:text-emerald-900 font-semibold transition-all py-1.5 px-3.5 bg-emerald-50/70 hover:bg-emerald-50 rounded-lg cursor-pointer"
+                      >
+                        <QrCode size={14} />
+                        QR코드 및 시험지 링크 공유하기
+                      </button>
+                    </div>
                   </form>
                 )}
               </div>
@@ -2006,6 +2026,116 @@ export default function App() {
                   type="button"
                   onClick={() => setSelectedQuestionDetail(null)}
                   className="px-4 py-2 bg-stone-900 hover:bg-stone-850 text-white text-xs font-bold rounded-xl transition-all shadow-xs cursor-pointer"
+                >
+                  닫기
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* QR Code sharing modal */}
+        {showQrModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/40 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl border border-stone-200 shadow-xl max-w-md w-full p-6 space-y-4 text-center relative"
+            >
+              <button
+                type="button"
+                onClick={() => setShowQrModal(false)}
+                className="absolute right-4 top-4 text-stone-400 hover:text-stone-600 p-1.5 hover:bg-stone-50 rounded-full transition-colors cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+
+              <div className="flex flex-col items-center pt-2">
+                <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center text-[#0F5A3E] mb-3">
+                  <QrCode size={24} />
+                </div>
+                <h3 className="font-serif font-bold text-lg text-stone-900">
+                  모바일 시험 응시용 QR코드 공유
+                </h3>
+                <p className="text-xs text-stone-500 mt-1 max-w-xs">
+                  스마트폰 카메라로 아래 QR코드를 스캔하거나 링크를 복사하여 수험생에게 공유하세요.
+                </p>
+              </div>
+
+              {/* QR Image Container */}
+              <div className="flex flex-col items-center justify-center p-4 bg-stone-50 rounded-xl border border-stone-150">
+                {qrUrl ? (
+                  <div className="relative p-2 bg-white rounded-lg border border-stone-200 shadow-xs">
+                    <img
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrUrl)}`}
+                      alt="Exam QR Code"
+                      className="w-[180px] h-[180px]"
+                      referrerPolicy="no-referrer"
+                    />
+                  </div>
+                ) : (
+                  <div className="w-[180px] h-[180px] flex items-center justify-center text-xs text-stone-400">
+                    URL을 입력해주세요
+                  </div>
+                )}
+                <span className="text-[10px] text-stone-400 mt-2 font-mono">
+                  api.qrserver.com 제공
+                </span>
+              </div>
+
+              {/* URL input and Copy button */}
+              <div className="space-y-2 text-left">
+                <label className="block text-[11px] font-bold text-stone-500">
+                  공유할 시험지 URL (수정 가능)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="url"
+                    value={qrUrl}
+                    onChange={(e) => {
+                      setQrUrl(e.target.value);
+                      setCopied(false);
+                    }}
+                    placeholder="https://..."
+                    className="flex-1 px-3 py-2 bg-stone-50 border border-stone-250 rounded-xl text-xs font-mono focus:outline-hidden focus:ring-1 focus:ring-emerald-800 focus:bg-white"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (qrUrl) {
+                        navigator.clipboard.writeText(qrUrl);
+                        setCopied(true);
+                        setTimeout(() => setCopied(false), 2000);
+                      }
+                    }}
+                    className={`px-3 py-2 rounded-xl border text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer ${
+                      copied
+                        ? 'bg-emerald-800 border-emerald-800 text-white'
+                        : 'bg-stone-900 border-stone-900 text-white hover:bg-stone-850'
+                    }`}
+                  >
+                    {copied ? <Check size={14} /> : <Copy size={14} />}
+                    <span>{copied ? "복사완료" : "복사"}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const newWindow = window.open(`https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=${encodeURIComponent(qrUrl)}`, '_blank');
+                    if (newWindow) newWindow.focus();
+                  }}
+                  className="flex-1 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-all cursor-pointer"
+                >
+                  QR 크게보기 / 인쇄용 열기
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowQrModal(false)}
+                  className="flex-1 py-2.5 bg-stone-900 hover:bg-stone-850 text-white font-semibold text-xs rounded-xl transition-all cursor-pointer"
                 >
                   닫기
                 </button>
