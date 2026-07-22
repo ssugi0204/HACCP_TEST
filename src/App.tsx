@@ -155,7 +155,7 @@ export default function App() {
   const handlePinNumpadClick = (num: string) => {
     setAdminPinInput(prev => {
       const nextVal = prev + num;
-      if (nextVal === "1234") {
+      if (nextVal === "5678") {
         setIsAdminMode(true);
         setShowAdminPinModal(false);
         return "";
@@ -198,7 +198,7 @@ export default function App() {
       if (['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'].includes(e.key)) {
         setAdminPinInput(prev => {
           const nextVal = prev + e.key;
-          if (nextVal === "1234") {
+          if (nextVal === "5678") {
             setIsAdminMode(true);
             setShowAdminPinModal(false);
             return "";
@@ -1866,7 +1866,7 @@ service cloud.firestore {
                   <Lock size={22} className="animate-pulse" />
                 </div>
                 <h3 className="font-serif font-bold text-stone-900 text-lg">관리자 모드 비밀번호 입력</h3>
-                <p className="text-xs text-stone-400 mt-1">5초 이내에 비밀번호 1234를 입력해 주세요.</p>
+                <p className="text-xs text-stone-400 mt-1">5초 이내에 비밀번호 5678을 입력해 주세요.</p>
               </div>
 
               {/* Countdown Progress Bar */}
