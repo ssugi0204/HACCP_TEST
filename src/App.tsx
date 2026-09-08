@@ -150,29 +150,20 @@ export default function App() {
   const [showQrModal, setShowQrModal] = useState(false);
   const [qrUrl, setQrUrl] = useState("");
   const [copied, setCopied] = useState(false);
-  const [showQrHelpGuide, setShowQrHelpGuide] = useState(false);
 
-  // 구글 로그인 요구 없이 외부 스마트폰에서 바로 접속 가능한 공개 공유 URL 계산 함수
+  // 구글 로그인 없이 외부 스마트폰에서 누구나 바로 접속 가능한 공식 Vercel 배포 URL
   const getPublicShareUrl = () => {
+    const vercelUrl = "https://haccp-test.vercel.app";
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("saved_custom_qr_url");
       if (saved && saved.trim().startsWith("http")) {
         return saved.trim();
       }
+      if (window.location.hostname.includes("vercel.app")) {
+        return window.location.origin;
+      }
     }
-    const defaultPublicUrl = "https://ais-pre-5ts2bsszsm3xfodefbk6hi-613735228043.asia-northeast1.run.app";
-    if (typeof window === "undefined") return defaultPublicUrl;
-
-    const currentHref = window.location.href;
-    // 개발자 전용 컨테이너 도메인(ais-dev-)은 구글 계정 로그인을 강제하므로 공개용 도메인(ais-pre-)으로 자동 치환
-    if (currentHref.includes("ais-dev-")) {
-      return currentHref.replace("ais-dev-", "ais-pre-");
-    }
-    // 로컬호스트나 아이프레임인 경우 공개 공유 URL 우선 적용
-    if (currentHref.includes("localhost") || currentHref.includes("127.0.0.1") || currentHref.includes("webcontainer")) {
-      return defaultPublicUrl;
-    }
-    return currentHref;
+    return vercelUrl;
   };
 
   // 현재 환경에 맞추어 로그인 불필요 공개 URL로 QR URL 초기화
@@ -2849,43 +2840,6 @@ service cloud.firestore {
                 </p>
               </div>
 
-              {/* Notice Box: Google Login Issue Explanation & Solution */}
-              <div className="bg-amber-50/90 border border-amber-200 rounded-xl p-3 text-left text-xs text-amber-950 space-y-1.5">
-                <div className="flex items-center justify-between font-bold text-amber-900">
-                  <span className="flex items-center gap-1.5">
-                    <AlertTriangle size={14} className="text-amber-700 shrink-0" />
-                    QR 스캔 시 '구글 로그인' 화면이 뜨는 원인 및 해결법
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setShowQrHelpGuide(!showQrHelpGuide)}
-                    className="text-[11px] text-amber-800 underline font-semibold cursor-pointer"
-                  >
-                    {showQrHelpGuide ? "접기" : "자세히 보기"}
-                  </button>
-                </div>
-                
-                {showQrHelpGuide ? (
-                  <div className="space-y-1.5 pt-1 text-[11px] text-amber-900 leading-relaxed border-t border-amber-250">
-                    <p>
-                      <strong>원인:</strong> 현재 주소(<code className="bg-amber-100/80 px-1 py-0.5 rounded text-[10px]">*.run.app</code>)는 Google AI Studio <strong>작업자 전용 프리뷰 서버</strong>이므로, 외부 스마트폰(로그인 세션 없음)으로 접속하면 구글 계정 로그인을 요구하게 됩니다.
-                    </p>
-                    <p>
-                      <strong>해결법 (전 직원 로그인 없이 응시):</strong>
-                    </p>
-                    <ol className="list-decimal list-inside pl-1 space-y-0.5 font-medium">
-                      <li>AI Studio 상단 우측의 <strong>[Share (공유)]</strong> 버튼을 클릭하여 공개 링크를 복사합니다.</li>
-                      <li>복사한 주소를 아래 [공유 시험지 URL] 입력칸에 붙여넣어 주세요.</li>
-                      <li>붙여넣는 즉시 <strong>로그인 없이 누구나 바로 응시 가능한 정식 QR코드</strong>로 자동 변경 저장됩니다!</li>
-                    </ol>
-                  </div>
-                ) : (
-                  <p className="text-[11px] text-amber-800 leading-tight">
-                    AI Studio 상단 <strong>[Share]</strong> 버튼으로 복사한 공개 링크를 아래 주소창에 붙여넣으시면, 로그인 요구 없이 즉시 시험을 볼 수 있는 QR코드로 자동 생성됩니다.
-                  </p>
-                )}
-              </div>
-
               {/* QR Image Container */}
               <div className="flex flex-col items-center justify-center p-3.5 bg-stone-50 rounded-xl border border-stone-150">
                 {qrUrl ? (
@@ -2904,7 +2858,7 @@ service cloud.firestore {
                 )}
                 <div className="flex items-center gap-1 text-[11px] text-emerald-800 font-semibold mt-2">
                   <CheckCircle2 size={13} className="text-emerald-700" />
-                  <span>스마트폰 스캔 시 시험 화면으로 연결</span>
+                  <span>스마트폰 스캔 시 시험 화면으로 즉시 연결</span>
                 </div>
               </div>
 
@@ -2925,7 +2879,7 @@ service cloud.firestore {
                         }}
                         className="text-[10px] font-bold text-stone-500 hover:text-stone-800 underline cursor-pointer"
                       >
-                        기본 프리뷰 URL로 복원
+                        기본 주소(Vercel)로 복원
                       </button>
                     )}
                   </div>
