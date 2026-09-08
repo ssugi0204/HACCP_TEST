@@ -33,6 +33,7 @@ import {
   CheckCircle2,
   Clock3,
   UserCheck,
+  ExternalLink,
   FileCheck,
   RotateCcw
 } from "lucide-react";
@@ -149,12 +150,34 @@ export default function App() {
   const [showQrModal, setShowQrModal] = useState(false);
   const [qrUrl, setQrUrl] = useState("");
   const [copied, setCopied] = useState(false);
+  const [showQrHelpGuide, setShowQrHelpGuide] = useState(false);
 
-  // 현재 브라우저 URL로 QR URL 초기화
-  useEffect(() => {
+  // 구글 로그인 요구 없이 외부 스마트폰에서 바로 접속 가능한 공개 공유 URL 계산 함수
+  const getPublicShareUrl = () => {
     if (typeof window !== "undefined") {
-      setQrUrl(window.location.href);
+      const saved = localStorage.getItem("saved_custom_qr_url");
+      if (saved && saved.trim().startsWith("http")) {
+        return saved.trim();
+      }
     }
+    const defaultPublicUrl = "https://ais-pre-5ts2bsszsm3xfodefbk6hi-613735228043.asia-northeast1.run.app";
+    if (typeof window === "undefined") return defaultPublicUrl;
+
+    const currentHref = window.location.href;
+    // 개발자 전용 컨테이너 도메인(ais-dev-)은 구글 계정 로그인을 강제하므로 공개용 도메인(ais-pre-)으로 자동 치환
+    if (currentHref.includes("ais-dev-")) {
+      return currentHref.replace("ais-dev-", "ais-pre-");
+    }
+    // 로컬호스트나 아이프레임인 경우 공개 공유 URL 우선 적용
+    if (currentHref.includes("localhost") || currentHref.includes("127.0.0.1") || currentHref.includes("webcontainer")) {
+      return defaultPublicUrl;
+    }
+    return currentHref;
+  };
+
+  // 현재 환경에 맞추어 로그인 불필요 공개 URL로 QR URL 초기화
+  useEffect(() => {
+    setQrUrl(getPublicShareUrl());
   }, []);
 
   const passingScoreThreshold = 70; // 70 points out of 100 (14 correct answers)
@@ -718,48 +741,6 @@ export default function App() {
     }
   };
 
-  // 3) 응시자(테스터) 전용: 현재 기기의 응시 기록 즉시 초기화 (다시 풀기)
-  const handleResetCurrentDeviceRecord = async () => {
-    const confirmMsg = 
-      "🔄 [현재 기기의 응시 기록 초기화]\n\n" +
-      "이 스마트폰/브라우저에 저장된 이전 시험 결과(25점 등)를 삭제하고 처음부터 다시 응시하시겠습니까?\n\n" +
-      "※ 확인을 누르면 새 시험 응시 화면으로 전환되어 성명과 부서를 입력하고 즉시 시험을 볼 수 있습니다.";
-
-    if (!window.confirm(confirmMsg)) {
-      return;
-    }
-
-    try {
-      // Firestore에 등록된 본인 기록이 있다면 Firestore에서도 삭제
-      if (myLocalExamRecord?.id) {
-        await deleteDoc(doc(db, "exam_history", myLocalExamRecord.id));
-      } else if (myLocalExamRecord) {
-        const matched = examHistory.find(r => 
-          (myLocalExamRecord.idNo && r.idNo === myLocalExamRecord.idNo) ||
-          (r.name === myLocalExamRecord.name && r.dept === myLocalExamRecord.dept)
-        );
-        if (matched && matched.id) {
-          await deleteDoc(doc(db, "exam_history", matched.id));
-        }
-      }
-    } catch (err) {
-      console.error("본인 기록 DB 삭제 중 오류:", err);
-    }
-
-    // 로컬 스토리지 및 시험 상태 완전 초기화
-    setMyLocalExamRecord(null);
-    localStorage.removeItem("my_haccp_exam_record");
-    localStorage.removeItem("haccp_examinee_info");
-    setIsExamStarted(false);
-    setIsSubmitted(false);
-    setIsReexamMode(false);
-    setAnswers({});
-    setSecondsElapsed(0);
-    setStartExamError(null);
-
-    alert("기록이 성공적으로 초기화되었습니다! 이제 시험을 다시 치르실 수 있습니다.");
-  };
-
   const downloadExcelReport = () => {
     if (examHistory.length === 0) return;
 
@@ -852,8 +833,11 @@ export default function App() {
       </style>
     </head>
     <body>
-      <div class="company-tag">KOOKSOONDANG | 주식회사 국순당</div>
+      <div class="company-tag">KOOKSOONDANG | 주식회사 국순당 횡성양조장</div>
       <h1>${title}</h1>
+      <div style="text-align:center; font-size:10pt; color:#555; margin-bottom:14px; font-weight:bold;">
+        [ 주관 부서: 품질보증팀 | 대상: 전 임직원 및 생산 작업자 ]
+      </div>
       
       <table class="header-table">
         <tr>
@@ -862,7 +846,7 @@ export default function App() {
           <th width="15%">성 명</th>
           <td width="25%"></td>
           <th width="10%">결 재</th>
-          <td width="10%">담당 / 팀장</td>
+          <td width="10%">담당 / 품질보증팀장</td>
         </tr>
         <tr>
           <th>평가 일자</th>
@@ -875,8 +859,8 @@ export default function App() {
       </table>
 
       <div class="instructions">
-        <b>[평가 안내사항]</b><br>
-        1. 본 시험은 ${yearText}년도 HACCP 및 선행요건 정기 위생교육 이수자를 대상으로 실시하는 내부 평가입니다.<br>
+        <b>[품질보증팀 평가 안내사항]</b><br>
+        1. 본 시험은 품질보증팀 주관 하에 ${yearText}년도 HACCP 및 선행요건 정기 위생교육 이수자를 대상으로 실시하는 내부 정기 평가입니다.<br>
         2. 총 20문항이며, 각 문항당 배점은 5점입니다. (70점 이상 합격)<br>
         3. 각 문항을 읽고 가장 알맞은 답의 번호를 하나 골라 선택하시오.
       </div>
@@ -917,10 +901,11 @@ export default function App() {
   const handleDownloadExamTxt = () => {
     const yearText = examPaperYear || new Date().getFullYear().toString();
     let txt = `=================================================================\n`;
-    txt += `[주식회사 국순당] ${yearText}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지\n`;
+    txt += `[국순당 횡성양조장] ${yearText}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지\n`;
+    txt += `주관 부서: 품질보증팀 | 대상: 전 임직원 및 작업자 (합격기준: 70점 이상)\n`;
     txt += `=================================================================\n`;
     txt += `소속: _______________   성명: _______________   일자: ${yearText}년 ___월 ___일\n`;
-    txt += `점수: _____점 / 100점    판정: [ 합격 / 불합격 ]\n`;
+    txt += `점수: _____점 / 100점    판정: [ 합격 / 불합격 ]   확인: 품질보증팀장 (인)\n`;
     txt += `-----------------------------------------------------------------\n\n`;
 
     haccpQuestions.forEach((q, idx) => {
@@ -1083,10 +1068,10 @@ export default function App() {
                     <div className="flex items-center gap-2">
                       <h1 className="font-serif font-bold text-xl md:text-2xl tracking-tight">HACCP 내부평가 관리자 시스템</h1>
                       <span className="text-[10px] bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 px-2.5 py-0.5 rounded-full font-sans font-bold">
-                        ADMIN MODE
+                        주관: 품질보증팀
                       </span>
                     </div>
-                    <p className="text-xs text-stone-400 mt-1 font-sans">국순당 횡성양조장 임직원 HACCP 내부평가 응시 결과 및 통계 관리 화면입니다.</p>
+                    <p className="text-xs text-stone-400 mt-1 font-sans">국순당 횡성양조장 품질보증팀 주관 임직원 HACCP 내부평가 응시 결과 및 통계 관리 화면입니다.</p>
                   </div>
                 </div>
                 <button
@@ -1320,6 +1305,18 @@ service cloud.firestore {
                       >
                         <Printer size={14} />
                         시험지 출력 / 파일 저장
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          setQrUrl(getPublicShareUrl());
+                          setShowQrModal(true);
+                        }}
+                        className="px-4 py-2 bg-[#0F5A3E] hover:bg-emerald-800 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                        title="임직원 스마트폰 카메라 응시용 공개 QR코드 열기"
+                      >
+                        <QrCode size={14} />
+                        모바일 응시 QR코드
                       </button>
 
                       <button
@@ -1624,14 +1621,20 @@ service cloud.firestore {
                     onClick={handleKooksoondangClick}
                     className="select-none"
                   >
-                    <KooksoondangLogo className="justify-center text-white mb-4 filter brightness-0 invert transition-opacity" />
+                    <KooksoondangLogo className="justify-center text-white mb-3 filter brightness-0 invert transition-opacity" />
                     <h1 className="font-serif font-bold text-2xl tracking-tight transition-colors">
                       국순당 횡성양조장
                     </h1>
                   </div>
-                  <h2 className="font-serif text-lg text-emerald-100/90 mt-1">HACCP 내부평가</h2>
-                  <p className="text-xs text-emerald-200/70 mt-3 max-w-md mx-auto leading-relaxed">
-                    본 평가는 횡성양조장의 위생 품질과 안전 관리 프로세스를 점검하고 향상시키기 위한 내부 필수 HACCP 이수 과정입니다.
+                  <h2 className="font-serif text-lg text-emerald-100/90 mt-1">2026년도 HACCP 내부평가</h2>
+                  <div className="mt-2.5 flex justify-center">
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-white/15 border border-white/25 rounded-full text-xs font-semibold text-emerald-50 shadow-2xs">
+                      <Shield size={13} className="text-emerald-300" />
+                      주관 부서: 품질보증팀
+                    </span>
+                  </div>
+                  <p className="text-xs text-emerald-200/80 mt-3 max-w-md mx-auto leading-relaxed">
+                    본 평가는 국순당 횡성양조장 품질보증팀 주관으로 전 임직원의 위생 품질과 HACCP 관리 프로세스를 점검하기 위해 실시되는 내부 필수 평가입니다.
                   </p>
                 </div>
 
@@ -1800,26 +1803,13 @@ service cloud.firestore {
                         </div>
                       </div>
 
-                      {/* Tester / Individual Reset Action Box */}
+                      {/* Security & Admin Notice Box */}
                       <div className="pt-3 border-t border-stone-200">
-                        <div className="bg-stone-100/90 rounded-xl p-4 border border-stone-250 flex flex-col sm:flex-row items-center justify-between gap-3 text-left">
-                          <div className="space-y-1">
-                            <div className="flex items-center gap-1.5 font-bold text-stone-800 text-xs">
-                              <RotateCcw size={14} className="text-[#0F5A3E]" />
-                              <span>시험 문제 확인 및 모의 재응시 (기록 초기화)</span>
-                            </div>
-                            <p className="text-[11px] text-stone-600 leading-relaxed">
-                              테스트를 위해 본 기기에 저장된 이전 응시 이력을 지우고 새 시험지로 성명/부서를 다시 입력하여 시작하시겠습니까?
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={handleResetCurrentDeviceRecord}
-                            className="w-full sm:w-auto px-4 py-2.5 bg-white hover:bg-red-50 text-stone-700 hover:text-red-700 border border-stone-300 hover:border-red-300 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs shrink-0 whitespace-nowrap"
-                          >
-                            <Trash2 size={13} className="text-stone-400" />
-                            기기 기록 초기화 (다시 풀기)
-                          </button>
+                        <div className="bg-stone-50 rounded-xl p-3.5 border border-stone-200 flex items-center gap-2.5 text-stone-600 text-xs">
+                          <Shield size={16} className="text-[#0F5A3E] shrink-0" />
+                          <p className="text-[11px] leading-relaxed">
+                            ※ 시험 응시 기록 관리 및 이력 초기화는 사내 HACCP 평가 관리 규정에 따라 <strong className="text-stone-800 font-semibold">관리자(품질보증/위생관리팀) 승인</strong> 하에서만 처리 가능합니다.
+                          </p>
                         </div>
                       </div>
                     </div>
@@ -1922,16 +1912,13 @@ service cloud.firestore {
                       <button
                         type="button"
                         onClick={() => {
-                          if (typeof window !== "undefined") {
-                            // If running in an iframe, the host might want the parent location or can override it
-                            setQrUrl(window.location.href);
-                          }
+                          setQrUrl(getPublicShareUrl());
                           setShowQrModal(true);
                         }}
                         className="flex items-center gap-1.5 text-xs text-[#0F5A3E] hover:text-emerald-900 font-semibold transition-all py-1.5 px-3.5 bg-emerald-50/70 hover:bg-emerald-50 rounded-lg cursor-pointer"
                       >
                         <QrCode size={14} />
-                        QR코드 및 시험지 링크 공유하기
+                        모바일 시험 응시용 QR코드 열기
                       </button>
                     </div>
                   </form>
@@ -2842,24 +2829,69 @@ service cloud.firestore {
                 <X size={18} />
               </button>
 
-              <div className="flex flex-col items-center pt-2">
-                <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center text-[#0F5A3E] mb-3">
-                  <QrCode size={24} />
+              <div className="flex flex-col items-center pt-1">
+                <div className="w-11 h-11 bg-emerald-50 rounded-full flex items-center justify-center text-[#0F5A3E] mb-2">
+                  <QrCode size={22} />
+                </div>
+                <div className="flex items-center gap-1.5 mb-1.5">
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">
+                    주관: 품질보증팀
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-stone-100 text-stone-700 border border-stone-300">
+                    모바일 응시 QR
+                  </span>
                 </div>
                 <h3 className="font-serif font-bold text-lg text-stone-900">
-                  모바일 시험 응시용 QR코드 공유
+                  모바일 시험 응시용 QR코드
                 </h3>
-                <p className="text-xs text-stone-500 mt-1 max-w-xs">
-                  스마트폰 카메라로 아래 QR코드를 스캔하거나 링크를 복사하여 수험생에게 공유하세요.
+                <p className="text-xs text-stone-500 mt-1 max-w-sm leading-normal">
+                  스마트폰 카메라로 아래 QR코드를 스캔하면 성명·소속 입력 후 2026년도 HACCP 시험지로 즉시 이동합니다.
                 </p>
               </div>
 
+              {/* Notice Box: Google Login Issue Explanation & Solution */}
+              <div className="bg-amber-50/90 border border-amber-200 rounded-xl p-3 text-left text-xs text-amber-950 space-y-1.5">
+                <div className="flex items-center justify-between font-bold text-amber-900">
+                  <span className="flex items-center gap-1.5">
+                    <AlertTriangle size={14} className="text-amber-700 shrink-0" />
+                    QR 스캔 시 '구글 로그인' 화면이 뜨는 원인 및 해결법
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowQrHelpGuide(!showQrHelpGuide)}
+                    className="text-[11px] text-amber-800 underline font-semibold cursor-pointer"
+                  >
+                    {showQrHelpGuide ? "접기" : "자세히 보기"}
+                  </button>
+                </div>
+                
+                {showQrHelpGuide ? (
+                  <div className="space-y-1.5 pt-1 text-[11px] text-amber-900 leading-relaxed border-t border-amber-250">
+                    <p>
+                      <strong>원인:</strong> 현재 주소(<code className="bg-amber-100/80 px-1 py-0.5 rounded text-[10px]">*.run.app</code>)는 Google AI Studio <strong>작업자 전용 프리뷰 서버</strong>이므로, 외부 스마트폰(로그인 세션 없음)으로 접속하면 구글 계정 로그인을 요구하게 됩니다.
+                    </p>
+                    <p>
+                      <strong>해결법 (전 직원 로그인 없이 응시):</strong>
+                    </p>
+                    <ol className="list-decimal list-inside pl-1 space-y-0.5 font-medium">
+                      <li>AI Studio 상단 우측의 <strong>[Share (공유)]</strong> 버튼을 클릭하여 공개 링크를 복사합니다.</li>
+                      <li>복사한 주소를 아래 [공유 시험지 URL] 입력칸에 붙여넣어 주세요.</li>
+                      <li>붙여넣는 즉시 <strong>로그인 없이 누구나 바로 응시 가능한 정식 QR코드</strong>로 자동 변경 저장됩니다!</li>
+                    </ol>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-amber-800 leading-tight">
+                    AI Studio 상단 <strong>[Share]</strong> 버튼으로 복사한 공개 링크를 아래 주소창에 붙여넣으시면, 로그인 요구 없이 즉시 시험을 볼 수 있는 QR코드로 자동 생성됩니다.
+                  </p>
+                )}
+              </div>
+
               {/* QR Image Container */}
-              <div className="flex flex-col items-center justify-center p-4 bg-stone-50 rounded-xl border border-stone-150">
+              <div className="flex flex-col items-center justify-center p-3.5 bg-stone-50 rounded-xl border border-stone-150">
                 {qrUrl ? (
-                  <div className="relative p-2 bg-white rounded-lg border border-stone-200 shadow-xs">
+                  <div className="relative p-2 bg-white rounded-xl border border-stone-200 shadow-sm">
                     <img
-                      src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrUrl)}`}
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(qrUrl)}`}
                       alt="Exam QR Code"
                       className="w-[180px] h-[180px]"
                       referrerPolicy="no-referrer"
@@ -2870,27 +2902,74 @@ service cloud.firestore {
                     URL을 입력해주세요
                   </div>
                 )}
-                <span className="text-[10px] text-stone-400 mt-2 font-mono">
-                  api.qrserver.com 제공
-                </span>
+                <div className="flex items-center gap-1 text-[11px] text-emerald-800 font-semibold mt-2">
+                  <CheckCircle2 size={13} className="text-emerald-700" />
+                  <span>스마트폰 스캔 시 시험 화면으로 연결</span>
+                </div>
               </div>
 
-              {/* URL input and Copy button */}
-              <div className="space-y-2 text-left">
-                <label className="block text-[11px] font-bold text-stone-500">
-                  공유할 시험지 URL (수정 가능)
-                </label>
-                <div className="flex gap-2">
+              {/* URL input and Copy / Paste buttons */}
+              <div className="space-y-1.5 text-left">
+                <div className="flex items-center justify-between">
+                  <label className="block text-[11px] font-bold text-stone-700">
+                    시험지 연결 주소 (URL)
+                  </label>
+                  <div className="flex items-center gap-2">
+                    {qrUrl !== getPublicShareUrl() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const pubUrl = getPublicShareUrl();
+                          setQrUrl(pubUrl);
+                          localStorage.setItem("saved_custom_qr_url", pubUrl);
+                        }}
+                        className="text-[10px] font-bold text-stone-500 hover:text-stone-800 underline cursor-pointer"
+                      >
+                        기본 프리뷰 URL로 복원
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="flex gap-1.5">
                   <input
                     type="url"
                     value={qrUrl}
                     onChange={(e) => {
-                      setQrUrl(e.target.value);
+                      const val = e.target.value;
+                      setQrUrl(val);
                       setCopied(false);
+                      if (val.trim()) {
+                        localStorage.setItem("saved_custom_qr_url", val.trim());
+                      }
                     }}
                     placeholder="https://..."
                     className="flex-1 px-3 py-2 bg-stone-50 border border-stone-250 rounded-xl text-xs font-mono focus:outline-hidden focus:ring-1 focus:ring-emerald-800 focus:bg-white"
                   />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const text = await navigator.clipboard.readText();
+                        if (text && text.startsWith("http")) {
+                          setQrUrl(text.trim());
+                          localStorage.setItem("saved_custom_qr_url", text.trim());
+                          setCopied(false);
+                        } else {
+                          alert("클립보드에 유효한 링크(URL)가 없습니다.");
+                        }
+                      } catch {
+                        const entered = prompt("복사한 공개 링크(Share URL)를 붙여넣어 주세요:", qrUrl);
+                        if (entered && entered.trim().startsWith("http")) {
+                          setQrUrl(entered.trim());
+                          localStorage.setItem("saved_custom_qr_url", entered.trim());
+                        }
+                      }
+                    }}
+                    className="px-2.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 rounded-xl text-xs font-bold transition-all cursor-pointer shrink-0"
+                    title="클립보드에서 붙여넣기"
+                  >
+                    붙여넣기
+                  </button>
                   <button
                     type="button"
                     onClick={() => {
@@ -2900,7 +2979,7 @@ service cloud.firestore {
                         setTimeout(() => setCopied(false), 2000);
                       }
                     }}
-                    className={`px-3 py-2 rounded-xl border text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer ${
+                    className={`px-3 py-2 rounded-xl border text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer shrink-0 ${
                       copied
                         ? 'bg-emerald-800 border-emerald-800 text-white'
                         : 'bg-stone-900 border-stone-900 text-white hover:bg-stone-850'
@@ -2912,7 +2991,7 @@ service cloud.firestore {
                 </div>
               </div>
 
-              <div className="flex gap-2.5 pt-2">
+              <div className="flex gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => {
@@ -2921,12 +3000,22 @@ service cloud.firestore {
                   }}
                   className="flex-1 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-all cursor-pointer"
                 >
-                  QR 크게보기 / 인쇄용 열기
+                  QR 크게보기 / 인쇄
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    window.open(qrUrl, '_blank');
+                  }}
+                  className="px-3 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl border border-stone-200 transition-all cursor-pointer flex items-center gap-1"
+                >
+                  <ExternalLink size={14} />
+                  새 탭 열기
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowQrModal(false)}
-                  className="flex-1 py-2.5 bg-stone-900 hover:bg-stone-850 text-white font-semibold text-xs rounded-xl transition-all cursor-pointer"
+                  className="px-4 py-2.5 bg-stone-900 hover:bg-stone-850 text-white font-semibold text-xs rounded-xl transition-all cursor-pointer"
                 >
                   닫기
                 </button>
@@ -3053,8 +3142,8 @@ service cloud.firestore {
                   <h2 className="text-xl font-bold text-stone-900 mt-2">
                     {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지
                   </h2>
-                  <p className="text-[11px] text-stone-500 font-sans">
-                    {examPaperType === 'student' ? '[ 수험생 응시용 문제지 ]' : '[ 관리자용 정답 및 해설지 ]'}
+                  <p className="text-[11px] text-stone-600 font-sans font-medium">
+                    주관 부서: 품질보증팀 &nbsp;|&nbsp; {examPaperType === 'student' ? '[ 수험생 응시용 문제지 ]' : '[ 관리자용 정답 및 해설지 ]'}
                   </p>
                 </div>
 
