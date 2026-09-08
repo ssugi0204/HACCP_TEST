@@ -389,7 +389,7 @@ export default function App() {
 
   // 5. Handlers
 
-  // 재시험 시작 핸들러: 처음 시험문제와 완전히 동일한 20문제로 출제
+  // 재시험 시작 핸들러
   const handleStartReexam = () => {
     setIsReexamMode(true);
     setAnswers({});
@@ -398,7 +398,7 @@ export default function App() {
     setCurrentCardIndex(0);
     // 평가일은 응시 당일 날짜로 자동 동기화
     setExaminee(prev => ({ ...prev, date: getTodayDateString() }));
-    // "처음 시험문제와 동일하게 재시험을 볼수 있도록" -> 원본 haccpQuestions 20문항 그대로 1~20번 정렬 출제
+    // 원본 haccpQuestions 20문항 출제
     setShuffledQuestions(haccpQuestions);
     setIsExamStarted(true);
     setIsTimerRunning(true);
@@ -408,25 +408,17 @@ export default function App() {
   // 관리자 모드: 재시험 승인 / 승인 취소 토글
   const handleToggleReexamApproval = async (record: ExamHistory) => {
     const newApproved = !record.reexamApproved;
-    const actionText = newApproved ? "재시험을 승인" : "재시험 승인을 취소";
-    
-    if (!window.confirm(`${record.name} (${record.dept}, ${record.score}점) 님의 ${actionText}하시겠습니까?\n\n※ 승인 시 응시자는 처음 시험과 동일한 문항으로 1회 재시험을 치를 수 있습니다.`)) {
-      return;
-    }
-
-    const targetKey = record.id || record.idNo || record.name;
+    const actionText = newApproved ? "품질보증팀 재시험 승인" : "재시험 승인 취소";
+    const targetKey = record.id || record.idNo || `${record.name}-${record.dept}`;
     setApprovalActionLoading(targetKey);
 
     try {
-      if (record.id) {
-        await updateDoc(doc(db, "exam_history", record.id), {
-          reexamApproved: newApproved
-        });
-      }
-
-      // 로컬 히스토리 상태 및 스토리지 업데이트
+      // 1. 로컬 상태 즉시 낙관적 업데이트 (UI 지연 및 블로킹 방지)
       const updatedHistory = examHistory.map(r => {
-        if ((record.id && r.id === record.id) || (record.idNo && r.idNo === record.idNo) || (r.name === record.name && r.dept === record.dept)) {
+        const isMatch = (record.id && r.id === record.id) ||
+                        (record.idNo && r.idNo === record.idNo) ||
+                        (r.name === record.name && r.dept === record.dept && (!r.round || r.round === 1));
+        if (isMatch) {
           return { ...r, reexamApproved: newApproved };
         }
         return r;
@@ -434,7 +426,7 @@ export default function App() {
       setExamHistory(updatedHistory);
       localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
 
-      // 현재 응시자 로컬 기록과 일치할 경우 함께 업데이트
+      // 2. 현재 로그인/접속 응시자의 로컬 기록과 일치할 경우 함께 업데이트
       if (myLocalExamRecord && (
         (record.id && myLocalExamRecord.id === record.id) || 
         (record.idNo && myLocalExamRecord.idNo === record.idNo) || 
@@ -445,11 +437,23 @@ export default function App() {
         localStorage.setItem("my_haccp_exam_record", JSON.stringify(updatedMy));
       }
 
-      setReexamApprovalToast(`${record.name} 님의 ${actionText}이 완료되었습니다.`);
+      // 3. Firestore 원격 데이터베이스에 승인 플래그 업데이트
+      if (record.id) {
+        try {
+          await updateDoc(doc(db, "exam_history", record.id), {
+            reexamApproved: newApproved
+          });
+        } catch (dbErr: any) {
+          console.warn("Firestore 승인 플래그 업데이트 중 오류 (로컬 상태는 보존됨):", dbErr);
+        }
+      }
+
+      setReexamApprovalToast(`[품질보증팀] ${record.name} (${record.dept}) 님의 ${actionText} 처리가 완료되었습니다.`);
       setTimeout(() => setReexamApprovalToast(null), 3500);
     } catch (err: any) {
       console.error("Failed to update reexam approval:", err);
-      alert("승인 상태 변경에 실패했습니다: " + err.message);
+      setReexamApprovalToast(`${record.name} 님의 승인 상태 처리에 오류가 발생했습니다.`);
+      setTimeout(() => setReexamApprovalToast(null), 3000);
     } finally {
       setApprovalActionLoading(null);
     }
@@ -462,31 +466,55 @@ export default function App() {
       return;
     }
 
-    // Check if examinee already took the exam in examHistory
-    const existingRecord = examHistory.find(r => 
-      r.name.trim() === examinee.name.trim() && r.dept === examinee.dept
+    // Check all previous records of this examinee
+    const userRecords = examHistory.filter(r => 
+      r.name.trim() === examinee.name.trim() && r.dept.trim() === examinee.dept.trim()
     );
 
-    if (existingRecord) {
-      if (existingRecord.score >= passingScoreThreshold) {
-        setStartExamError(`이미 ${existingRecord.name}님은 ${existingRecord.score}점으로 최종 합격하셨습니다. 재응시 대상이 아닙니다.`);
-        setMyLocalExamRecord(existingRecord);
-        localStorage.setItem("my_haccp_exam_record", JSON.stringify(existingRecord));
+    if (userRecords.length > 0) {
+      // 1차 기록과 2차 기록 구분
+      const firstRecord = userRecords.find(r => (!r.round || r.round === 1) && !r.isReexam);
+      const secondRecord = userRecords.find(r => r.round === 2 || r.isReexam);
+
+      // 이미 2차 재시험까지 모두 마친 경우
+      if (secondRecord) {
+        setMyLocalExamRecord(secondRecord);
+        localStorage.setItem("my_haccp_exam_record", JSON.stringify(secondRecord));
+        if (secondRecord.score >= passingScoreThreshold) {
+          setStartExamError(`이미 ${secondRecord.name}님은 2차 재시험에서 ${secondRecord.score}점으로 최종 합격하셨습니다.`);
+        } else {
+          setStartExamError(`${secondRecord.name}님은 1차(${firstRecord?.score ?? '-'}점) 및 2차 재시험(${secondRecord.score}점)을 모두 완료하셨습니다. 추가 조치는 품질보증팀에 문의해주세요.`);
+        }
         return;
-      } else {
-        // 재시험 대상자 (70점 미만)
-        if (!existingRecord.reexamApproved) {
-          setStartExamError(`${existingRecord.name}님은 이전 평가(${existingRecord.score}점)로 재시험 대상자입니다. 관리자의 사전 승인 후에만 재시험 응시가 가능합니다. 관리자에게 승인을 요청해주세요.`);
-          setMyLocalExamRecord(existingRecord);
-          localStorage.setItem("my_haccp_exam_record", JSON.stringify(existingRecord));
+      }
+
+      // 1차 기록만 있는 경우
+      if (firstRecord) {
+        if (firstRecord.score >= passingScoreThreshold) {
+          setStartExamError(`이미 ${firstRecord.name}님은 ${firstRecord.score}점으로 최종 합격하셨습니다. 재응시 대상이 아닙니다.`);
+          setMyLocalExamRecord(firstRecord);
+          localStorage.setItem("my_haccp_exam_record", JSON.stringify(firstRecord));
           return;
         } else {
-          // 관리자 승인이 완료된 재시험 대상자!
-          setMyLocalExamRecord(existingRecord);
-          localStorage.setItem("my_haccp_exam_record", JSON.stringify(existingRecord));
-          localStorage.setItem("haccp_examinee_info", JSON.stringify(examinee));
-          handleStartReexam();
-          return;
+          // 70점 미만 (재평가 또는 재교육+재평가 대상자)
+          if (!firstRecord.reexamApproved) {
+            const needRetrain = firstRecord.score < 50;
+            setStartExamError(
+              needRetrain 
+                ? `${firstRecord.name}님은 1차 평가 점수(${firstRecord.score}점)로 [재교육+재평가] 대상자입니다. 품질보증팀의 재교육 이수 및 승인 완료 후에만 재시험 응시가 가능합니다.`
+                : `${firstRecord.name}님은 1차 평가 점수(${firstRecord.score}점)로 [재평가] 대상자입니다. 품질보증팀의 승인 완료 후에만 재시험 응시가 가능합니다.`
+            );
+            setMyLocalExamRecord(firstRecord);
+            localStorage.setItem("my_haccp_exam_record", JSON.stringify(firstRecord));
+            return;
+          } else {
+            // 관리자 승인이 완료된 재시험 대상자! 1차 시험 결과는 안전하게 보존한 채 2차 재시험 시작
+            setMyLocalExamRecord(firstRecord);
+            localStorage.setItem("my_haccp_exam_record", JSON.stringify(firstRecord));
+            localStorage.setItem("haccp_examinee_info", JSON.stringify(examinee));
+            handleStartReexam();
+            return;
+          }
         }
       }
     }
@@ -597,7 +625,7 @@ export default function App() {
     
     const firstNames = ["민준", "서준", "도윤", "예준", "시우", "하준", "주원", "지호", "지후", "준서", "서연", "서윤", "지우", "서현", "하은", "하윤", "민서", "지아", "윤서", "채원"];
     const lastNames = ["김", "이", "박", "최", "정", "강", "조", "윤", "장", "임", "한", "오", "서", "신", "권", "황", "안", "송", "류", "전"];
-    const departments = ["품질관리과", "약주발효팀", "포장생산과", "원료위생팀", "제품안전팀", "기획관리과", "생산관리팀", "출하검사과"];
+    const departments = ["양조1팀", "양조2팀", "생산지원팀", "설비기술팀", "품질보증팀", "자연그대로"];
     
     const newSamples: ExamHistory[] = [];
     for (let i = 0; i < count; i++) {
@@ -773,7 +801,7 @@ export default function App() {
 
     examHistory.forEach(record => {
       const score = record.score;
-      const status = score >= 70 ? "합격" : score >= 50 ? "재시험" : "재교육";
+      const status = score >= 70 ? "합격" : score >= 50 ? "재평가" : "재교육+재평가";
       const correctAnsCount = Math.round(score / 5);
       const wrongAnsCount = 20 - correctAnsCount;
       const recYear = record.year || (record.date ? parseInt(record.date.split('-')[0], 10) : new Date().getFullYear());
@@ -863,14 +891,14 @@ export default function App() {
           <th>평가 점수</th>
           <td>_____ 점 / 100점</td>
           <th>판 정</th>
-          <td>[합격 / 불합격]</td>
+          <td>[합격 / 재평가 / 재교육+재평가]</td>
         </tr>
       </table>
 
       <div class="instructions">
         <b>[품질보증팀 평가 안내사항]</b><br>
         1. 본 시험은 품질보증팀 주관 하에 ${yearText}년도 HACCP 및 선행요건 정기 위생교육 이수자를 대상으로 실시하는 내부 정기 평가입니다.<br>
-        2. 총 20문항이며, 각 문항당 배점은 5점입니다. (70점 이상 합격)<br>
+        2. 총 20문항이며, 각 문항당 배점은 5점입니다. (70점 이상 합격, 70점 미만 재평가, 50점 미만 재교육+재평가)<br>
         3. 각 문항을 읽고 가장 알맞은 답의 번호를 하나 골라 선택하시오.
       </div>
 
@@ -1157,10 +1185,10 @@ service cloud.firestore {
                       </div>
                       <div>
                         <div className="text-xs font-bold text-amber-900">
-                          재시험 승인 대기 응시자 <span className="underline decoration-amber-500 font-mono text-amber-800 text-sm">{pendingCount}명</span>
+                          재시험(재평가) 승인 대기 응시자 <span className="underline decoration-amber-500 font-mono text-amber-800 text-sm">{pendingCount}명</span>
                         </div>
                         <div className="text-[11px] text-amber-700">
-                          HACCP 평가 규정상 70점 미만 응시자는 관리자의 사전 승인 후에만 동일 문항으로 재시험을 치를 수 있습니다.
+                          HACCP 평가 규정상 70점 미만 응시자는 품질보증팀의 사전 승인 후에만 재평가를 치를 수 있습니다.
                         </div>
                       </div>
                     </div>
@@ -1239,10 +1267,10 @@ service cloud.firestore {
                         합격: {passed}
                       </span>
                       <span className="text-[10px] font-bold bg-amber-55 text-amber-800 border border-amber-100 px-2 py-0.5 rounded-full">
-                        재시험: {reexam}
+                        재평가: {reexam}
                       </span>
                       <span className="text-[10px] font-bold bg-red-50 text-red-700 border border-red-100 px-2 py-0.5 rounded-full">
-                        재교육: {retrain}
+                        재교육+재평가: {retrain}
                       </span>
                     </div>
                   </div>
@@ -1296,8 +1324,8 @@ service cloud.firestore {
                       >
                         <option value="all">전체 평가 판정 결과</option>
                         <option value="passed">합격 (70점 이상)</option>
-                        <option value="reexam">재시험 대상 (50점 ~ 69점)</option>
-                        <option value="retrain">재교육 대상 (50점 미만)</option>
+                        <option value="reexam">재평가 대상 (50점 ~ 69점)</option>
+                        <option value="retrain">재교육+재평가 대상 (50점 미만)</option>
                         <option value="reexam_pending">⏳ 재시험 승인 대기자 ({examHistory.filter(r => r.score < passingScoreThreshold && !r.reexamApproved).length}명)</option>
                         <option value="reexam_approved">✅ 재시험 승인 완료자 ({examHistory.filter(r => r.score < passingScoreThreshold && r.reexamApproved).length}명)</option>
                       </select>
@@ -1492,7 +1520,7 @@ service cloud.firestore {
                                       disabled={approvalActionLoading === actionTargetKey}
                                       onClick={() => handleToggleReexamApproval(record)}
                                       className="px-3 py-1 text-[11px] font-bold bg-[#0F5A3E] hover:bg-emerald-800 text-white rounded-lg transition-colors shadow-2xs cursor-pointer flex items-center gap-1 disabled:opacity-50"
-                                      title="동일 문항 재시험 승인"
+                                      title="품질보증팀 재시험 승인"
                                     >
                                       <CheckCircle2 size={13} />
                                       재시험 승인
@@ -1516,7 +1544,7 @@ service cloud.firestore {
                                       ? 'bg-amber-55 text-amber-800 border border-amber-100' 
                                       : 'bg-red-50 text-red-700 border border-red-100'
                                 }`}>
-                                  {recordStatus === 'passed' ? '합격' : recordStatus === 'reexam' ? '재시험' : '재교육'}
+                                  {recordStatus === 'passed' ? '합격' : recordStatus === 'reexam' ? '재평가' : '재교육+재평가'}
                                 </span>
                               </div>
                             </div>
@@ -1554,12 +1582,12 @@ service cloud.firestore {
                                   )}
                                   <div>
                                     <span className="font-bold">
-                                      {isApproved ? '관리자 재시험 승인 완료 상태' : '관리자 재시험 승인 대기 상태'}
+                                      {isApproved ? '품질보증팀 재시험 승인 완료 상태' : '품질보증팀 재시험 승인 대기 상태'}
                                     </span>
                                     <span className="text-[11px] block text-stone-600">
                                       {isApproved 
-                                        ? '응시자는 시작 화면에서 처음 시험과 동일한 20문제로 즉시 재시험을 응시할 수 있습니다.' 
-                                        : '응시자가 재시험을 치르려면 관리자의 승인이 필요합니다.'}
+                                        ? '품질보증팀 승인이 완료되어, 응시자는 시작 화면에서 즉시 재시험에 응시할 수 있습니다.' 
+                                        : '응시자가 재시험을 치르려면 품질보증팀의 승인이 필요합니다.'}
                                     </span>
                                   </div>
                                 </div>
@@ -1572,7 +1600,7 @@ service cloud.firestore {
                                       : 'bg-[#0F5A3E] text-white hover:bg-emerald-800 shadow-2xs'
                                   }`}
                                 >
-                                  {isApproved ? '승인 취소하기' : '지금 재시험 승인하기'}
+                                  {isApproved ? '승인 취소하기' : '품질보증팀 승인하기'}
                                 </button>
                               </div>
                             )}
@@ -1678,37 +1706,64 @@ service cloud.firestore {
                           <CheckCircle2 className="text-emerald-700 shrink-0 mt-0.5" size={20} />
                           <div className="space-y-1.5">
                             <div className="flex items-center gap-2">
-                              <p className="font-bold text-emerald-950 text-sm">관리자 재시험 승인 완료</p>
+                              <p className="font-bold text-emerald-950 text-sm">품질보증팀 재시험 승인 완료</p>
                               <span className="px-2 py-0.5 bg-emerald-200/80 text-emerald-900 rounded-md font-bold text-[10px]">
                                 재시험 가능
                               </span>
                             </div>
                             <p className="text-emerald-800 leading-normal">
-                              관리자(품질보증/위생관리팀)의 재시험 승인이 완료되었습니다.
+                              품질보증팀의 재시험 승인이 완료되었습니다.
                             </p>
                             <div className="bg-white/80 p-2.5 rounded-lg border border-emerald-200 text-[11px] text-emerald-900 font-medium">
-                              ※ <strong>처음 시험문제와 완전히 동일한 20문항</strong>으로 재시험이 진행됩니다. 준비를 마치신 후 아래 [재시험 시작] 버튼을 눌러주십시오.
+                              ※ 아래 [재시험 시작하기] 버튼을 눌러 평가를 진행해 주시기 바랍니다.
                             </div>
                           </div>
                         </div>
+                      ) : latestRecord.score < 50 ? (
+                        /* 50점 미만: 재교육 + 재평가 대상 */
+                        <div className="bg-red-50 text-red-900 text-xs p-4 rounded-xl border border-red-200 flex items-start gap-3 leading-relaxed shadow-2xs">
+                          <AlertTriangle className="text-red-600 shrink-0 mt-0.5" size={20} />
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <p className="font-bold text-red-950 text-sm">
+                                재교육 + 재평가 대상자 (품질보증팀 승인 대기)
+                              </p>
+                              <span className="px-2 py-0.5 bg-red-200/80 text-red-900 rounded-md font-bold text-[10px]">
+                                재교육 및 승인 필요
+                              </span>
+                            </div>
+                            <p className="text-red-800">
+                              귀하는 1차 평가 점수 <strong className="font-bold text-red-950 font-mono">{latestRecord.score}점</strong>으로 <strong className="underline decoration-red-500">[재교육 + 재평가]</strong> 대상입니다.
+                            </p>
+                            <p className="text-red-800">
+                              HACCP 사내 규정에 따라 <strong className="font-bold underline decoration-red-600">품질보증팀의 재교육을 이수</strong>하신 후 품질보증팀의 사전 승인이 완료되어야만 재평가에 응시하실 수 있습니다.
+                            </p>
+                            <p className="text-stone-500 text-[11px] pt-1">
+                              품질보증팀에 재교육 이수 확인 및 승인을 요청해 주시기 바랍니다.
+                            </p>
+                          </div>
+                        </div>
                       ) : (
-                        <div className="bg-amber-50 text-amber-900 text-xs p-4 rounded-xl border border-amber-200 flex items-start gap-3 leading-relaxed">
+                        /* 70점 미만 (50점 이상): 재평가 대상 */
+                        <div className="bg-amber-50 text-amber-900 text-xs p-4 rounded-xl border border-amber-200 flex items-start gap-3 leading-relaxed shadow-2xs">
                           <Clock3 className="text-amber-700 shrink-0 mt-0.5" size={20} />
                           <div className="space-y-1">
                             <div className="flex items-center gap-2">
-                              <p className="font-bold text-amber-950 text-sm">재시험 대상자 (관리자 승인 대기 중)</p>
+                              <p className="font-bold text-amber-950 text-sm">
+                                재평가 대상자 (품질보증팀 승인 대기)
+                              </p>
                               <span className="px-2 py-0.5 bg-amber-200/80 text-amber-900 rounded-md font-bold text-[10px]">
                                 승인 필요
                               </span>
                             </div>
                             <p className="text-amber-800">
-                              귀하는 1차 평가 점수 <strong className="font-bold text-amber-950 font-mono">{latestRecord.score}점</strong>으로 재시험 대상입니다.
+                              귀하는 1차 평가 점수 <strong className="font-bold text-amber-950 font-mono">{latestRecord.score}점</strong>으로 <strong className="underline decoration-amber-600">[재평가]</strong> 대상입니다.
                             </p>
                             <p className="text-amber-800">
-                              HACCP 사내 규정에 따라 <strong className="font-bold underline decoration-amber-600">관리자(품질보증/위생관리팀)의 사전 승인</strong>이 완료되어야만 재시험에 응시하실 수 있습니다.
+                              HACCP 사내 규정에 따라 <strong className="font-bold underline decoration-amber-600">품질보증팀의 사전 승인</strong>이 완료되어야만 재평가에 응시하실 수 있습니다.
                             </p>
                             <p className="text-stone-500 text-[11px] pt-1">
-                              관리자에게 승인을 요청하신 뒤, 승인이 완료되면 본 화면에서 재시험을 시작하실 수 있습니다.
+                              품질보증팀에 승인을 요청하신 뒤, 승인이 완료되면 본 화면에서 재평가를 시작하실 수 있습니다.
                             </p>
                           </div>
                         </div>
@@ -1723,7 +1778,7 @@ service cloud.firestore {
                               className="w-full py-3.5 bg-[#0F5A3E] hover:bg-emerald-800 text-white font-bold text-sm rounded-xl shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
                             >
                               <FileCheck size={18} />
-                              2026년도 HACCP 재시험 시작하기 (처음 시험과 동일 문항)
+                              {new Date().getFullYear()}년도 HACCP 재시험 시작하기
                             </button>
                           ) : (
                             <div className="space-y-2">
@@ -1732,20 +1787,20 @@ service cloud.firestore {
                                 className="w-full py-3 bg-stone-200 text-stone-400 font-bold text-xs rounded-xl flex items-center justify-center gap-2 cursor-not-allowed"
                               >
                                 <Clock3 size={15} />
-                                관리자 승인 후 재시험 응시 가능
+                                품질보증팀 승인 후 재시험 응시 가능
                               </button>
                               <button
                                 onClick={() => {
                                   if (latestRecord.reexamApproved) {
-                                    alert("관리자 재시험 승인이 완료되었습니다! 즉시 재시험을 시작할 수 있습니다.");
+                                    alert("품질보증팀 재시험 승인이 완료되었습니다! 즉시 재시험을 시작할 수 있습니다.");
                                   } else {
-                                    alert("현재 관리자 승인 대기 중입니다. 관리자에게 승인을 요청해 주세요.");
+                                    alert("현재 품질보증팀 승인 대기 중입니다. 품질보증팀에 승인을 요청해 주세요.");
                                   }
                                 }}
                                 className="w-full py-2 bg-stone-50 hover:bg-stone-100 text-stone-700 border border-stone-250 font-semibold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                               >
                                 <Clock3 size={14} className="text-stone-500" />
-                                관리자 승인 상태 새로고침 / 확인
+                                품질보증팀 승인 상태 새로고침 / 확인
                               </button>
                             </div>
                           )}
@@ -1787,26 +1842,35 @@ service cloud.firestore {
                             <div>
                               <span className="text-stone-400 block font-medium">종합 평가 결과</span>
                               <span className={`text-lg font-bold ${latestRecord.score >= 70 ? 'text-emerald-800' : latestRecord.score >= 50 ? 'text-amber-700' : 'text-red-600'}`}>
-                                {latestRecord.score}점 ({latestRecord.score >= 70 ? '합격' : latestRecord.score >= 50 ? '재시험 대상' : '재교육 대상'})
+                                {latestRecord.score}점 ({latestRecord.score >= 70 ? '합격' : latestRecord.score >= 50 ? '재평가 대상' : '재교육+재평가 대상'})
                               </span>
                               {!isCandidatePassed && (
                                 <span className="block text-[11px] font-medium text-stone-500 mt-0.5">
-                                  재시험 승인: <strong className={isReexamApproved ? 'text-emerald-700' : 'text-amber-700'}>{isReexamApproved ? '승인 완료' : '관리자 승인 대기'}</strong>
+                                  재시험 승인: <strong className={isReexamApproved ? 'text-emerald-700' : 'text-amber-700'}>{isReexamApproved ? '품질보증팀 승인 완료' : '품질보증팀 승인 대기'}</strong>
                                 </span>
                               )}
                             </div>
                             
                             {/* Circle Stamp */}
-                            <div className={`w-14 h-14 rounded-full border-2 ${
+                            <div className={`w-16 h-16 md:w-20 md:h-20 rounded-full border-2 ${
                               latestRecord.score >= 70 
-                                ? 'border-emerald-600 text-emerald-700 bg-emerald-50/50' 
+                                ? 'border-emerald-600 text-emerald-700 bg-emerald-50/70' 
                                 : latestRecord.score >= 50 
-                                  ? 'border-amber-600 text-amber-700 bg-amber-50/50' 
-                                  : 'border-red-600 text-red-700 bg-red-50/50'
-                            } flex flex-col items-center justify-center font-bold text-[11px] rotate-12 shrink-0 shadow-xs`}>
-                              <span className="scale-90 font-extrabold font-sans">
-                                {latestRecord.score >= 70 ? '합격' : latestRecord.score >= 50 ? '재시험' : '재교육'}
-                              </span>
+                                  ? 'border-amber-600 text-amber-700 bg-amber-50/70' 
+                                  : 'border-red-600 text-red-700 bg-red-50/70'
+                            } flex flex-col items-center justify-center font-bold rotate-12 shrink-0 shadow-xs p-1 border-dashed`}>
+                              <span className="text-[7px] md:text-[8px] leading-none text-stone-500 font-sans">국순당</span>
+                              {latestRecord.score >= 70 ? (
+                                <span className="font-extrabold text-xs md:text-sm text-emerald-800 tracking-wider my-0.5">합 격</span>
+                              ) : latestRecord.score >= 50 ? (
+                                <span className="font-extrabold text-xs md:text-sm text-amber-700 tracking-wider my-0.5">재평가</span>
+                              ) : (
+                                <div className="flex flex-col items-center justify-center leading-none my-0.5">
+                                  <span className="font-black text-[9px] md:text-[10px] text-red-700">재교육</span>
+                                  <span className="font-black text-[8px] md:text-[9px] text-red-600 mt-0.5">+ 재평가</span>
+                                </div>
+                              )}
+                              <span className="text-[6px] md:text-[7px] leading-none text-stone-400 font-sans">횡성양조장</span>
                             </div>
                           </div>
                         </div>
@@ -1817,7 +1881,7 @@ service cloud.firestore {
                         <div className="bg-stone-50 rounded-xl p-3.5 border border-stone-200 flex items-center gap-2.5 text-stone-600 text-xs">
                           <Shield size={16} className="text-[#0F5A3E] shrink-0" />
                           <p className="text-[11px] leading-relaxed">
-                            ※ 시험 응시 기록 관리 및 이력 초기화는 사내 HACCP 평가 관리 규정에 따라 <strong className="text-stone-800 font-semibold">관리자(품질보증/위생관리팀) 승인</strong> 하에서만 처리 가능합니다.
+                            ※ 시험 응시 기록 관리 및 이력 초기화는 사내 HACCP 평가 관리 규정에 따라 <strong className="text-stone-800 font-semibold">품질보증팀 관리자 승인</strong> 하에서만 처리 가능합니다.
                           </p>
                         </div>
                       </div>
@@ -2002,7 +2066,7 @@ service cloud.firestore {
                     <div className="bg-indigo-50 border border-indigo-200 text-indigo-900 px-4 py-2.5 rounded-xl text-xs flex items-center justify-between shadow-2xs">
                       <div className="flex items-center gap-2 font-bold">
                         <CheckCircle2 size={15} className="text-indigo-600 shrink-0" />
-                        <span>[2차 재시험 진행 중] 관리자 승인 완료 — 처음 시험과 완전히 동일한 20문항으로 출제되었습니다.</span>
+                        <span>[2차 재시험 진행 중] 품질보증팀 승인 완료 — 2차 재시험에 응시합니다.</span>
                       </div>
                       <span className="text-[10px] bg-indigo-200/70 text-indigo-900 px-2 py-0.5 rounded font-mono font-bold shrink-0">
                         2차 재시험
@@ -2019,19 +2083,34 @@ service cloud.firestore {
                     >
                       <div className={`p-6 text-center ${isPassed ? 'bg-emerald-50/50' : 'bg-orange-50/40'} border-b border-stone-150 relative`}>
                         {/* Stamp Overlay */}
-                        <div className="absolute right-6 top-6 md:right-12 md:top-8 rotate-12 select-none pointer-events-none">
-                          <div className={`w-24 h-24 rounded-full border-4 ${
+                        <div className="absolute right-4 top-4 md:right-12 md:top-8 rotate-12 select-none pointer-events-none">
+                          <div className={`w-28 h-28 md:w-32 md:h-32 rounded-full border-4 ${
                             finalScore >= 70 
-                              ? 'border-emerald-700 text-emerald-800 bg-emerald-50/70' 
+                              ? 'border-emerald-700 text-emerald-800 bg-emerald-50/80' 
                               : finalScore >= 50 
-                                ? 'border-amber-600 text-amber-700 bg-amber-50/70' 
-                                : 'border-red-600 text-red-700 bg-red-50/70'
+                                ? 'border-amber-600 text-amber-700 bg-amber-50/80' 
+                                : 'border-red-600 text-red-700 bg-red-50/80'
                           } flex flex-col items-center justify-center font-bold text-center border-dashed p-1 shadow-sm`}>
-                            <span className="text-xs leading-none font-sans">국순당</span>
-                            <span className="text-base font-extrabold tracking-wider my-1 font-sans">
-                              {finalScore >= 70 ? '합 격' : finalScore >= 50 ? '재시험' : '재교육'}
-                            </span>
-                            <span className="text-[9px] leading-none font-sans">횡성양조장</span>
+                            <span className="text-[10px] md:text-xs leading-none font-sans font-semibold">국순당</span>
+                            {finalScore >= 70 ? (
+                              <span className="text-base md:text-lg font-extrabold tracking-widest my-1 font-sans text-emerald-800">
+                                합 격
+                              </span>
+                            ) : finalScore >= 50 ? (
+                              <span className="text-base md:text-lg font-extrabold tracking-wider my-1 font-sans text-amber-700">
+                                재평가
+                              </span>
+                            ) : (
+                              <div className="flex flex-col items-center justify-center leading-tight my-0.5">
+                                <span className="text-xs md:text-sm font-black tracking-tight text-red-700">
+                                  재교육
+                                </span>
+                                <span className="text-[11px] md:text-xs font-black tracking-tight text-red-600">
+                                  + 재평가
+                                </span>
+                              </div>
+                            )}
+                            <span className="text-[9px] md:text-[10px] leading-none font-sans font-medium">횡성양조장</span>
                           </div>
                         </div>
 
@@ -2041,13 +2120,13 @@ service cloud.firestore {
                             {isReexamMode ? "2차 재시험 채점 결과 리포트" : "채점 결과 리포트"}
                           </h2>
                           <p className="text-xs text-stone-500 mt-1">
-                            {isReexamMode ? "처음 시험과 동일한 문항으로 치러진 재시험이 정상 채점되었습니다." : "수고하셨습니다! 제출하신 HACCP 답안지가 정상 채점되었습니다."}
+                            {isReexamMode ? "제출하신 2차 재시험 답안지가 정상 채점되었습니다." : "수고하셨습니다! 제출하신 HACCP 답안지가 정상 채점되었습니다."}
                           </p>
                           
                           <div className="grid grid-cols-3 gap-3 my-6 bg-white rounded-xl p-4 border border-stone-200">
                             <div>
                               <span className="text-[10px] font-bold text-stone-400 block uppercase">종합 점수</span>
-                              <span className={`text-2xl font-mono font-black ${isPassed ? 'text-emerald-800' : 'text-red-600'}`}>{finalScore}점</span>
+                              <span className={`text-2xl font-mono font-black ${isPassed ? 'text-emerald-800' : finalScore >= 50 ? 'text-amber-700' : 'text-red-600'}`}>{finalScore}점</span>
                             </div>
                             <div>
                               <span className="text-[10px] font-bold text-stone-400 block uppercase">정답 개수</span>
@@ -2062,9 +2141,9 @@ service cloud.firestore {
                           <div className="flex flex-wrap items-center justify-center gap-3">
                             {isPassed ? (
                               <div className="space-y-3 w-full">
-                                <p className="text-sm text-emerald-800 font-semibold flex items-center justify-center gap-1">
-                                  <Check size={16} />
-                                  축하합니다! 합격 기준({passingScoreThreshold}점)을 충족하여 평가를 무사히 통과하였습니다.
+                                <p className="text-sm text-emerald-800 font-semibold flex items-center justify-center gap-1.5 bg-emerald-50/70 p-3.5 rounded-xl border border-emerald-200">
+                                  <Check size={18} className="text-emerald-700" />
+                                  <span>축하합니다! 합격 기준({passingScoreThreshold}점)을 충족하여 평가를 무사히 통과하였습니다.</span>
                                 </p>
                                 <div className="flex justify-center gap-2">
                                   <button
@@ -2075,23 +2154,47 @@ service cloud.firestore {
                                   </button>
                                 </div>
                               </div>
-                            ) : (
+                            ) : finalScore < 50 ? (
+                              /* 50점 미만: 재교육 + 재평가 대상 (빨간색 테마) */
                               <div className="space-y-3 w-full">
-                                <p className="text-xs text-red-600 flex flex-col items-center justify-center gap-1 font-medium bg-red-50/50 p-3.5 rounded-xl border border-red-100 leading-relaxed">
-                                  <span className="flex items-center gap-1 text-sm font-bold">
-                                    <AlertTriangle size={16} className="text-red-500" />
-                                    {finalScore < 50 ? "HACCP 재교육 대상" : "HACCP 재평가 대상"}
+                                <div className="text-xs text-red-700 flex flex-col items-center justify-center gap-1.5 font-medium bg-red-50 p-4 rounded-xl border border-red-200 leading-relaxed shadow-2xs">
+                                  <span className="flex items-center gap-1.5 text-sm font-bold text-red-800">
+                                    <AlertTriangle size={18} className="text-red-600 shrink-0" />
+                                    <span>HACCP 재교육 + 재평가 대상 (50점 미만)</span>
                                   </span>
-                                  <span className="text-center mt-1 max-w-md">
+                                  <span className="text-center mt-1 max-w-lg text-red-900 leading-normal">
                                     {isReexamMode 
-                                      ? `2차 재시험에서도 기준 점수(${passingScoreThreshold}점)에 도달하지 못했습니다. 추후 사내 위생품질관리 지침에 따라 별도 교육 일정을 안내해 드릴 예정입니다.`
-                                      : `합격 기준(${passingScoreThreshold}점) 미만으로 재평가 대상입니다. 사내 HACCP 평가 규정에 따라 관리자(품질보증/위생관리팀)의 승인을 받으시면 처음 시험과 동일한 문항으로 재시험에 응시하실 수 있습니다.`}
+                                      ? `2차 재시험에서도 기준 점수(${passingScoreThreshold}점)에 도달하지 못했습니다. 품질보증팀의 별도 심층 교육 및 지도 지침에 따라 주시기 바랍니다.`
+                                      : `귀하의 취득 점수는 ${finalScore}점으로, 50점 미만 [재교육 + 재평가] 대상입니다. 사내 HACCP 평가 규정에 따라 품질보증팀의 재교육을 이수하신 후 품질보증팀의 승인을 받아 재평가에 응시하실 수 있습니다.`}
                                   </span>
-                                </p>
+                                </div>
                                 <div className="flex justify-center gap-2">
                                   <button
                                     onClick={handleExitExam}
-                                    className="px-6 py-2.5 bg-stone-700 hover:bg-stone-800 text-white font-bold text-xs rounded-xl transition-colors cursor-pointer"
+                                    className="px-6 py-2.5 bg-red-700 hover:bg-red-800 text-white font-bold text-xs rounded-xl transition-colors cursor-pointer shadow-xs"
+                                  >
+                                    확인 및 처음으로
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              /* 70점 미만 (50점 이상): 재평가 대상 (주황색/앰버 테마) */
+                              <div className="space-y-3 w-full">
+                                <div className="text-xs text-amber-900 flex flex-col items-center justify-center gap-1.5 font-medium bg-amber-50 p-4 rounded-xl border border-amber-200 leading-relaxed shadow-2xs">
+                                  <span className="flex items-center gap-1.5 text-sm font-bold text-amber-950">
+                                    <AlertTriangle size={18} className="text-amber-600 shrink-0" />
+                                    <span>HACCP 재평가 대상 (70점 미만)</span>
+                                  </span>
+                                  <span className="text-center mt-1 max-w-lg text-amber-900 leading-normal">
+                                    {isReexamMode 
+                                      ? `2차 재시험에서도 기준 점수(${passingScoreThreshold}점)에 도달하지 못했습니다. 품질보증팀의 별도 교육 및 지도 지침에 따라 주시기 바랍니다.`
+                                      : `귀하의 취득 점수는 ${finalScore}점으로, 합격 기준(${passingScoreThreshold}점) 미만 [재평가] 대상입니다. 사내 HACCP 평가 규정에 따라 품질보증팀의 승인을 받으신 후 재평가에 응시하실 수 있습니다.`}
+                                  </span>
+                                </div>
+                                <div className="flex justify-center gap-2">
+                                  <button
+                                    onClick={handleExitExam}
+                                    className="px-6 py-2.5 bg-stone-700 hover:bg-stone-800 text-white font-bold text-xs rounded-xl transition-colors cursor-pointer shadow-xs"
                                   >
                                     확인 및 처음으로
                                   </button>
@@ -3206,7 +3309,7 @@ service cloud.firestore {
               <th className="border border-stone-900 bg-stone-100 p-2 font-bold">평가 점수</th>
               <td className="border border-stone-900 p-2 font-mono">_____ 점 / 100점</td>
               <th className="border border-stone-900 bg-stone-100 p-2 font-bold">판 정</th>
-              <td className="border border-stone-900 p-2 font-bold">[합격/불합격]</td>
+              <td className="border border-stone-900 p-2 font-bold">[합격 / 재평가 / 재교육+재평가]</td>
             </tr>
           </tbody>
         </table>
@@ -3214,7 +3317,7 @@ service cloud.firestore {
         <div className="border border-stone-400 bg-stone-50 p-3.5 mb-6 text-xs leading-relaxed">
           <p className="font-bold mb-1">[평가 안내사항]</p>
           <p>1. 본 시험은 {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 이수자를 대상으로 실시하는 내부 평가입니다.</p>
-          <p>2. 총 20문항이며, 각 문항당 배점은 5점입니다. (70점 이상 합격)</p>
+          <p>2. 총 20문항이며, 각 문항당 배점은 5점입니다. (70점 이상 합격, 70점 미만 재평가, 50점 미만 재교육+재평가)</p>
           <p>3. 각 문항을 읽고 가장 알맞은 답의 번호를 하나 골라 표시하시오.</p>
         </div>
 
