@@ -99,14 +99,23 @@ const shuffleArray = <T,>(array: T[]): T[] => {
   return arr;
 };
 
+// 당일 날짜(YYYY-MM-DD)를 로컬 시간 기준으로 정확히 계산하는 헬퍼 함수
+const getTodayDateString = (): string => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 export default function App() {
   // 1. App States
-  const [examinee, setExaminee] = useState<ExamineeInfo>({
+  const [examinee, setExaminee] = useState<ExamineeInfo>(() => ({
     name: "",
     dept: "",
     idNo: "",
-    date: new Date().toISOString().split('T')[0]
-  });
+    date: getTodayDateString()
+  }));
   
   const [isExamStarted, setIsExamStarted] = useState(false);
   const [answers, setAnswers] = useState<Record<number, number>>({});
@@ -143,7 +152,7 @@ export default function App() {
 
   // 시험지 출력 / 파일 저장 모달 상태
   const [showExamPaperModal, setShowExamPaperModal] = useState(false);
-  const [examPaperYear, setExamPaperYear] = useState<string>("2026");
+  const [examPaperYear, setExamPaperYear] = useState<string>(() => new Date().getFullYear().toString());
   const [examPaperType, setExamPaperType] = useState<'student' | 'teacher'>('student');
 
   // QR Code 공유 모달 상태
@@ -259,11 +268,12 @@ export default function App() {
 
   // 2. Load and save states from LocalStorage
   useEffect(() => {
+    const todayDate = getTodayDateString();
     let initialExaminee = {
       name: "",
       dept: "",
       idNo: "",
-      date: new Date().toISOString().split('T')[0]
+      date: todayDate
     };
 
     const savedInfo = localStorage.getItem("haccp_examinee_info");
@@ -273,7 +283,8 @@ export default function App() {
         initialExaminee = {
           ...initialExaminee,
           ...parsed,
-          name: "" // Always blank on start screen
+          name: "", // Always blank on start screen
+          date: todayDate // 평가일은 항상 접속 당일로 자동 설정
         };
       } catch (e) {
         console.error(e);
@@ -385,6 +396,8 @@ export default function App() {
     setSecondsElapsed(0);
     setIsSubmitted(false);
     setCurrentCardIndex(0);
+    // 평가일은 응시 당일 날짜로 자동 동기화
+    setExaminee(prev => ({ ...prev, date: getTodayDateString() }));
     // "처음 시험문제와 동일하게 재시험을 볼수 있도록" -> 원본 haccpQuestions 20문항 그대로 1~20번 정렬 출제
     setShuffledQuestions(haccpQuestions);
     setIsExamStarted(true);
@@ -480,8 +493,14 @@ export default function App() {
 
     setStartExamError(null);
     setIsReexamMode(false);
+    const todayDate = getTodayDateString();
+    const updatedExaminee = {
+      ...examinee,
+      date: todayDate
+    };
+    setExaminee(updatedExaminee);
     // Save info to local storage
-    localStorage.setItem("haccp_examinee_info", JSON.stringify(examinee));
+    localStorage.setItem("haccp_examinee_info", JSON.stringify(updatedExaminee));
     
     // Reset answers and timer
     setAnswers({});
@@ -511,9 +530,8 @@ export default function App() {
     setIsSubmitted(true);
     setIsTimerRunning(false);
     
-    const currentDate = new Date();
-    const dateStr = currentDate.toISOString().split('T')[0];
-    const currentYear = currentDate.getFullYear();
+    const dateStr = getTodayDateString();
+    const currentYear = new Date().getFullYear();
     
     // Add to history in Firestore
     const newRecord: ExamHistory = {
@@ -1617,7 +1635,7 @@ service cloud.firestore {
                       국순당 횡성양조장
                     </h1>
                   </div>
-                  <h2 className="font-serif text-lg text-emerald-100/90 mt-1">2026년도 HACCP 내부평가</h2>
+                  <h2 className="font-serif text-lg text-emerald-100/90 mt-1">{new Date().getFullYear()}년도 HACCP 내부평가</h2>
                   <div className="mt-2.5 flex justify-center">
                     <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-white/15 border border-white/25 rounded-full text-xs font-semibold text-emerald-50 shadow-2xs">
                       <Shield size={13} className="text-emerald-300" />
@@ -1874,12 +1892,18 @@ service cloud.firestore {
                           />
                         </div>
                         <div>
-                          <label className="block text-xs font-semibold text-stone-600 mb-1">평가일</label>
+                          <label className="block text-xs font-semibold text-stone-600 mb-1 flex items-center justify-between">
+                            <span>평가일</span>
+                            <span className="text-[10px] text-emerald-800 font-bold bg-emerald-100/80 px-1.5 py-0.5 rounded border border-emerald-300">
+                              당일 자동설정
+                            </span>
+                          </label>
                           <input
                             type="date"
-                            value={examinee.date}
-                            onChange={e => setExaminee(prev => ({ ...prev, date: e.target.value }))}
-                            className="w-full px-3 py-2.5 bg-stone-50 border border-stone-250 rounded-xl text-sm text-stone-800 focus:outline-hidden"
+                            readOnly
+                            value={examinee.date || getTodayDateString()}
+                            className="w-full px-3 py-2.5 bg-stone-100 border border-stone-200 rounded-xl text-sm text-stone-700 font-medium focus:outline-hidden cursor-not-allowed select-none"
+                            title="평가일은 응시 당일로 자동 설정됩니다."
                           />
                         </div>
                       </div>
@@ -2836,7 +2860,7 @@ service cloud.firestore {
                   모바일 시험 응시용 QR코드
                 </h3>
                 <p className="text-xs text-stone-500 mt-1 max-w-sm leading-normal">
-                  스마트폰 카메라로 아래 QR코드를 스캔하면 성명·소속 입력 후 2026년도 HACCP 시험지로 즉시 이동합니다.
+                  스마트폰 카메라로 아래 QR코드를 스캔하면 성명·소속 입력 후 {new Date().getFullYear()}년도 HACCP 시험지로 즉시 이동합니다.
                 </p>
               </div>
 
