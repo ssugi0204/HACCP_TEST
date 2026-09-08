@@ -29,11 +29,16 @@ import {
   ChevronDown,
   Home,
   QrCode,
-  Copy
+  Copy,
+  CheckCircle2,
+  Clock3,
+  UserCheck,
+  FileCheck,
+  RotateCcw
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { haccpQuestions, Question } from "./data/questions";
-import { collection, addDoc, onSnapshot, query, orderBy, Timestamp, deleteDoc, doc } from "firebase/firestore";
+import { collection, addDoc, onSnapshot, query, orderBy, Timestamp, deleteDoc, doc, updateDoc } from "firebase/firestore";
 import { db } from "./lib/firebase";
 
 // Custom Kooksoondang Logo SVG/HTML Component (High-fidelity corporate brand design)
@@ -71,12 +76,16 @@ interface ExamHistory {
   id?: string;
   createdAt?: any;
   date: string;
+  year?: number;
   score: number;
   passed: boolean;
   name: string;
   dept: string;
   idNo?: string;
   answers?: Record<number, number>;
+  reexamApproved?: boolean; // 관리자 재시험 승인 여부
+  isReexam?: boolean;       // 재시험 여부
+  round?: number;           // 1차(1) or 2차 재시험(2)
 }
 
 // Helper to shuffle array
@@ -113,6 +122,8 @@ export default function App() {
   const [showCheatSheet, setShowCheatSheet] = useState(false);
   const [showOMRModalMobile, setShowOMRModalMobile] = useState(false);
   const [examHistory, setExamHistory] = useState<ExamHistory[]>([]);
+  const [isHistoryLoaded, setIsHistoryLoaded] = useState(false);
+  const [isClearingHistory, setIsClearingHistory] = useState(false);
   const [firebaseError, setFirebaseError] = useState<string | null>(null);
   const [myLocalExamRecord, setMyLocalExamRecord] = useState<ExamHistory | null>(null);
   const [activeTab, setActiveTab] = useState<'exam' | 'history'>('exam');
@@ -120,8 +131,19 @@ export default function App() {
   const [startExamError, setStartExamError] = useState<string | null>(null);
   const [selectedHistoryDetail, setSelectedHistoryDetail] = useState<ExamHistory | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<'all' | 'passed' | 'reexam' | 'retrain'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'passed' | 'reexam' | 'retrain' | 'reexam_pending' | 'reexam_approved'>('all');
+  const [yearFilter, setYearFilter] = useState<string>("all");
   const [dummyCountInput, setDummyCountInput] = useState<string>("5");
+
+  // 재시험 모드 및 관리자 승인 관련 상태
+  const [isReexamMode, setIsReexamMode] = useState(false);
+  const [approvalActionLoading, setApprovalActionLoading] = useState<string | null>(null);
+  const [reexamApprovalToast, setReexamApprovalToast] = useState<string | null>(null);
+
+  // 시험지 출력 / 파일 저장 모달 상태
+  const [showExamPaperModal, setShowExamPaperModal] = useState(false);
+  const [examPaperYear, setExamPaperYear] = useState<string>("2026");
+  const [examPaperType, setExamPaperType] = useState<'student' | 'teacher'>('student');
 
   // QR Code 공유 모달 상태
   const [showQrModal, setShowQrModal] = useState(false);
@@ -273,14 +295,25 @@ export default function App() {
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const historyData: ExamHistory[] = [];
       snapshot.forEach((doc) => {
-        historyData.push({ id: doc.id, ...doc.data() } as ExamHistory);
+        const data = doc.data();
+        const docDate = data.date || "";
+        const fallbackYear = docDate ? parseInt(docDate.split('-')[0], 10) : new Date().getFullYear();
+        const recordYear = data.year || (isNaN(fallbackYear) ? new Date().getFullYear() : fallbackYear);
+        
+        historyData.push({ 
+          id: doc.id, 
+          ...data,
+          year: recordYear
+        } as ExamHistory);
       });
       setExamHistory(historyData);
       setFirebaseError(null);
+      setIsHistoryLoaded(true);
       localStorage.setItem("haccp_exam_history_admin", JSON.stringify(historyData));
     }, (error) => {
       console.error("Firestore onSnapshot error:", error);
       setFirebaseError(error.code || "error");
+      setIsHistoryLoaded(true);
     });
 
     return () => unsubscribe();
@@ -297,6 +330,31 @@ export default function App() {
     return () => clearInterval(interval);
   }, [isTimerRunning, isSubmitted]);
 
+  // 3-1. Synchronize local examinee record with Firestore latest updates (e.g. reexam approval or record deletion)
+  useEffect(() => {
+    if (isHistoryLoaded && myLocalExamRecord) {
+      const matched = examHistory.find(r => 
+        (myLocalExamRecord.id && r.id === myLocalExamRecord.id) ||
+        (myLocalExamRecord.idNo && r.idNo === myLocalExamRecord.idNo) ||
+        (r.name === myLocalExamRecord.name && r.dept === myLocalExamRecord.dept)
+      );
+
+      // 관리자가 DB에서 이력을 리셋했거나 해당 응시자 기록을 삭제한 경우:
+      // 서버에 더 이상 기록이 없으므로 로컬 저장소의 이전 응시 기록도 자동 초기화하여 새 시험 응시 허용
+      if (!matched && !firebaseError) {
+        setMyLocalExamRecord(null);
+        localStorage.removeItem("my_haccp_exam_record");
+        return;
+      }
+
+      if (matched && matched.reexamApproved !== myLocalExamRecord.reexamApproved) {
+        const updated = { ...myLocalExamRecord, reexamApproved: matched.reexamApproved };
+        setMyLocalExamRecord(updated);
+        localStorage.setItem("my_haccp_exam_record", JSON.stringify(updated));
+      }
+    }
+  }, [examHistory, myLocalExamRecord, isHistoryLoaded, firebaseError]);
+
   // 4. Score Calculation
   const correctCount = haccpQuestions.reduce((acc, q) => {
     return acc + (answers[q.id] === q.correctAnswer ? 1 : 0);
@@ -305,13 +363,109 @@ export default function App() {
   const isPassed = finalScore >= passingScoreThreshold;
 
   // 5. Handlers
+
+  // 재시험 시작 핸들러: 처음 시험문제와 완전히 동일한 20문제로 출제
+  const handleStartReexam = () => {
+    setIsReexamMode(true);
+    setAnswers({});
+    setSecondsElapsed(0);
+    setIsSubmitted(false);
+    setCurrentCardIndex(0);
+    // "처음 시험문제와 동일하게 재시험을 볼수 있도록" -> 원본 haccpQuestions 20문항 그대로 1~20번 정렬 출제
+    setShuffledQuestions(haccpQuestions);
+    setIsExamStarted(true);
+    setIsTimerRunning(true);
+    setStartExamError(null);
+  };
+
+  // 관리자 모드: 재시험 승인 / 승인 취소 토글
+  const handleToggleReexamApproval = async (record: ExamHistory) => {
+    const newApproved = !record.reexamApproved;
+    const actionText = newApproved ? "재시험을 승인" : "재시험 승인을 취소";
+    
+    if (!window.confirm(`${record.name} (${record.dept}, ${record.score}점) 님의 ${actionText}하시겠습니까?\n\n※ 승인 시 응시자는 처음 시험과 동일한 문항으로 1회 재시험을 치를 수 있습니다.`)) {
+      return;
+    }
+
+    const targetKey = record.id || record.idNo || record.name;
+    setApprovalActionLoading(targetKey);
+
+    try {
+      if (record.id) {
+        await updateDoc(doc(db, "exam_history", record.id), {
+          reexamApproved: newApproved
+        });
+      }
+
+      // 로컬 히스토리 상태 및 스토리지 업데이트
+      const updatedHistory = examHistory.map(r => {
+        if ((record.id && r.id === record.id) || (record.idNo && r.idNo === record.idNo) || (r.name === record.name && r.dept === record.dept)) {
+          return { ...r, reexamApproved: newApproved };
+        }
+        return r;
+      });
+      setExamHistory(updatedHistory);
+      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
+
+      // 현재 응시자 로컬 기록과 일치할 경우 함께 업데이트
+      if (myLocalExamRecord && (
+        (record.id && myLocalExamRecord.id === record.id) || 
+        (record.idNo && myLocalExamRecord.idNo === record.idNo) || 
+        (record.name === myLocalExamRecord.name && record.dept === myLocalExamRecord.dept)
+      )) {
+        const updatedMy = { ...myLocalExamRecord, reexamApproved: newApproved };
+        setMyLocalExamRecord(updatedMy);
+        localStorage.setItem("my_haccp_exam_record", JSON.stringify(updatedMy));
+      }
+
+      setReexamApprovalToast(`${record.name} 님의 ${actionText}이 완료되었습니다.`);
+      setTimeout(() => setReexamApprovalToast(null), 3500);
+    } catch (err: any) {
+      console.error("Failed to update reexam approval:", err);
+      alert("승인 상태 변경에 실패했습니다: " + err.message);
+    } finally {
+      setApprovalActionLoading(null);
+    }
+  };
+
   const handleStartExam = (e: React.FormEvent) => {
     e.preventDefault();
     if (!examinee.name.trim() || !examinee.dept.trim()) {
       setStartExamError("성명과 소속을 모두 입력해 주세요.");
       return;
     }
+
+    // Check if examinee already took the exam in examHistory
+    const existingRecord = examHistory.find(r => 
+      r.name.trim() === examinee.name.trim() && r.dept === examinee.dept
+    );
+
+    if (existingRecord) {
+      if (existingRecord.score >= passingScoreThreshold) {
+        setStartExamError(`이미 ${existingRecord.name}님은 ${existingRecord.score}점으로 최종 합격하셨습니다. 재응시 대상이 아닙니다.`);
+        setMyLocalExamRecord(existingRecord);
+        localStorage.setItem("my_haccp_exam_record", JSON.stringify(existingRecord));
+        return;
+      } else {
+        // 재시험 대상자 (70점 미만)
+        if (!existingRecord.reexamApproved) {
+          setStartExamError(`${existingRecord.name}님은 이전 평가(${existingRecord.score}점)로 재시험 대상자입니다. 관리자의 사전 승인 후에만 재시험 응시가 가능합니다. 관리자에게 승인을 요청해주세요.`);
+          setMyLocalExamRecord(existingRecord);
+          localStorage.setItem("my_haccp_exam_record", JSON.stringify(existingRecord));
+          return;
+        } else {
+          // 관리자 승인이 완료된 재시험 대상자!
+          setMyLocalExamRecord(existingRecord);
+          localStorage.setItem("my_haccp_exam_record", JSON.stringify(existingRecord));
+          localStorage.setItem("haccp_examinee_info", JSON.stringify(examinee));
+          handleStartReexam();
+          return;
+        }
+      }
+    }
+
     setStartExamError(null);
+    setIsReexamMode(false);
     // Save info to local storage
     localStorage.setItem("haccp_examinee_info", JSON.stringify(examinee));
     
@@ -343,20 +497,45 @@ export default function App() {
     setIsSubmitted(true);
     setIsTimerRunning(false);
     
+    const currentDate = new Date();
+    const dateStr = currentDate.toISOString().split('T')[0];
+    const currentYear = currentDate.getFullYear();
+    
     // Add to history in Firestore
     const newRecord: ExamHistory = {
-      date: new Date().toISOString().split('T')[0],
+      date: dateStr,
+      year: currentYear,
       score: finalScore,
       passed: finalScore >= passingScoreThreshold,
       name: examinee.name,
       dept: examinee.dept,
       idNo: examinee.idNo,
       answers: { ...answers },
-      createdAt: Timestamp.now()
+      createdAt: Timestamp.now(),
+      isReexam: isReexamMode,
+      round: isReexamMode ? 2 : 1,
+      reexamApproved: false // 응시 완료 후 승인 소진
     };
     
     try {
-      await addDoc(collection(db, "exam_history"), newRecord);
+      const docRef = await addDoc(collection(db, "exam_history"), newRecord);
+      newRecord.id = docRef.id;
+
+      // 만약 재시험이었다면 이전 레코드의 reexamApproved도 false로 소진 처리
+      if (isReexamMode) {
+        const prevRecord = examHistory.find(r => 
+          ((r.idNo && r.idNo === examinee.idNo) || (r.name === examinee.name && r.dept === examinee.dept)) && r.id !== docRef.id
+        );
+        if (prevRecord && prevRecord.id) {
+          try {
+            await updateDoc(doc(db, "exam_history", prevRecord.id), {
+              reexamApproved: false
+            });
+          } catch (e) {
+            console.error("이전 기록 승인 플래그 업데이트 실패:", e);
+          }
+        }
+      }
     } catch (e: any) {
       console.error("Error adding document: ", e);
       if (e.code === 'permission-denied') {
@@ -409,16 +588,19 @@ export default function App() {
       });
 
       const dateObj = new Date();
-      dateObj.setDate(dateObj.getDate() - Math.floor(Math.random() * 30));
+      // Randomize dates within recent days of 2026
+      dateObj.setDate(dateObj.getDate() - Math.floor(Math.random() * 60));
       const dateStr = dateObj.toISOString().split('T')[0];
+      const sampleYear = 2026;
 
       newSamples.push({
         date: dateStr,
+        year: sampleYear,
         score: score,
         passed: score >= passingScoreThreshold,
         name: name,
         dept: dept,
-        idNo: `HS-2026-${randomId}`,
+        idNo: `HS-${sampleYear}-${randomId}`,
         answers: mockAnswers,
         createdAt: Timestamp.fromDate(dateObj)
       });
@@ -445,31 +627,144 @@ export default function App() {
     }
   };
 
-  const handleClearHistory = () => {
-    if (window.confirm("모든 응시 이력을 정말 삭제하시겠습니까? (Firestore에서 모두 삭제됩니다)")) {
-      let errorOccurred = false;
-      examHistory.forEach(async (record) => {
+  // 1) 관리자: 전체 응시 이력 완전 초기화 (Firestore + 로컬 스토리지 일괄 리셋)
+  const handleClearHistory = async () => {
+    if (examHistory.length === 0) {
+      alert("삭제할 응시 이력이 없습니다.");
+      return;
+    }
+
+    const confirmMsg = 
+      "⚠️ [전체 응시 이력 완전 초기화]\n\n" +
+      `현재 등록된 총 ${examHistory.length}명의 모든 응시 기록을 정말로 완전히 삭제하시겠습니까?\n\n` +
+      "※ 삭제 시 데이터베이스(Firestore) 및 모든 기기의 시험 기록이 영구 삭제되며, 모든 응시자가 처음부터 다시 시험을 볼 수 있게 리셋됩니다.\n" +
+      "※ 테스트 진행 후 정식 오픈 전 모든 시험 데이터를 비울 때 사용하십시오.";
+
+    if (!window.confirm(confirmMsg)) {
+      return;
+    }
+
+    setIsClearingHistory(true);
+    let failCount = 0;
+
+    try {
+      const deletePromises = examHistory.map(async (record) => {
         if (record.id) {
           try {
             await deleteDoc(doc(db, "exam_history", record.id));
           } catch (e) {
-            console.error("Error deleting document: ", e);
-            errorOccurred = true;
+            console.error("문서 삭제 오류 (ID: " + record.id + "):", e);
+            failCount++;
           }
         }
       });
-      // Fallback
-      if (errorOccurred) {
-        localStorage.removeItem("haccp_exam_history_admin");
-        setExamHistory([]);
+      await Promise.all(deletePromises);
+
+      // 로컬 스토리지 및 로컬 상태 일괄 초기화
+      setExamHistory([]);
+      localStorage.removeItem("haccp_exam_history_admin");
+      setMyLocalExamRecord(null);
+      localStorage.removeItem("my_haccp_exam_record");
+      localStorage.removeItem("haccp_examinee_info");
+
+      if (failCount > 0) {
+        alert(`일부 항목(${failCount}건)을 제외하고 전체 응시 이력이 초기화되었습니다.`);
+      } else {
+        alert("✅ 모든 응시 이력이 성공적으로 완전 초기화되었습니다!\n이제 모든 인원이 처음부터 다시 깨끗하게 응시할 수 있습니다.");
       }
+    } catch (e: any) {
+      console.error("전체 이력 초기화 오류: ", e);
+      alert("초기화 중 오류가 발생했습니다: " + e.message);
+      // Fallback: 로컬이라도 비움
+      localStorage.removeItem("haccp_exam_history_admin");
+      setExamHistory([]);
+      setMyLocalExamRecord(null);
+      localStorage.removeItem("my_haccp_exam_record");
+    } finally {
+      setIsClearingHistory(false);
     }
+  };
+
+  // 2) 관리자: 개별 응시자 기록 삭제 (해당 인원만 다시 시험 볼 수 있도록 리셋)
+  const handleDeleteSingleRecord = async (record: ExamHistory) => {
+    const confirmMsg = `[${record.name} (${record.dept}, ${record.score}점)] 님의 응시 기록을 삭제하시겠습니까?\n\n※ 삭제 시 해당 인원은 새 응시자로 리셋되어 처음부터 시험을 다시 치를 수 있습니다.`;
+    if (!window.confirm(confirmMsg)) {
+      return;
+    }
+
+    try {
+      if (record.id) {
+        await deleteDoc(doc(db, "exam_history", record.id));
+      }
+      const updated = examHistory.filter(r => (record.id ? r.id !== record.id : r !== record));
+      setExamHistory(updated);
+      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updated));
+
+      // 만약 현재 접속 기기의 시험 기록과 동일한 경우 본인 로컬 기록도 함께 제거
+      if (myLocalExamRecord && (
+        (record.id && myLocalExamRecord.id === record.id) ||
+        (record.idNo && myLocalExamRecord.idNo === record.idNo) ||
+        (record.name === myLocalExamRecord.name && record.dept === myLocalExamRecord.dept)
+      )) {
+        setMyLocalExamRecord(null);
+        localStorage.removeItem("my_haccp_exam_record");
+        localStorage.removeItem("haccp_examinee_info");
+      }
+
+      alert(`[${record.name}] 님의 응시 기록이 정상적으로 삭제되었습니다. 이제 다시 응시할 수 있습니다.`);
+    } catch (err: any) {
+      console.error("개별 기록 삭제 오류:", err);
+      alert("기록 삭제 실패: " + err.message);
+    }
+  };
+
+  // 3) 응시자(테스터) 전용: 현재 기기의 응시 기록 즉시 초기화 (다시 풀기)
+  const handleResetCurrentDeviceRecord = async () => {
+    const confirmMsg = 
+      "🔄 [현재 기기의 응시 기록 초기화]\n\n" +
+      "이 스마트폰/브라우저에 저장된 이전 시험 결과(25점 등)를 삭제하고 처음부터 다시 응시하시겠습니까?\n\n" +
+      "※ 확인을 누르면 새 시험 응시 화면으로 전환되어 성명과 부서를 입력하고 즉시 시험을 볼 수 있습니다.";
+
+    if (!window.confirm(confirmMsg)) {
+      return;
+    }
+
+    try {
+      // Firestore에 등록된 본인 기록이 있다면 Firestore에서도 삭제
+      if (myLocalExamRecord?.id) {
+        await deleteDoc(doc(db, "exam_history", myLocalExamRecord.id));
+      } else if (myLocalExamRecord) {
+        const matched = examHistory.find(r => 
+          (myLocalExamRecord.idNo && r.idNo === myLocalExamRecord.idNo) ||
+          (r.name === myLocalExamRecord.name && r.dept === myLocalExamRecord.dept)
+        );
+        if (matched && matched.id) {
+          await deleteDoc(doc(db, "exam_history", matched.id));
+        }
+      }
+    } catch (err) {
+      console.error("본인 기록 DB 삭제 중 오류:", err);
+    }
+
+    // 로컬 스토리지 및 시험 상태 완전 초기화
+    setMyLocalExamRecord(null);
+    localStorage.removeItem("my_haccp_exam_record");
+    localStorage.removeItem("haccp_examinee_info");
+    setIsExamStarted(false);
+    setIsSubmitted(false);
+    setIsReexamMode(false);
+    setAnswers({});
+    setSecondsElapsed(0);
+    setStartExamError(null);
+
+    alert("기록이 성공적으로 초기화되었습니다! 이제 시험을 다시 치르실 수 있습니다.");
   };
 
   const downloadExcelReport = () => {
     if (examHistory.length === 0) return;
 
     const headers = [
+      "연도",
       "수험 번호",
       "성명",
       "소속 부서/팀",
@@ -491,9 +786,11 @@ export default function App() {
       const status = score >= 70 ? "합격" : score >= 50 ? "재시험" : "재교육";
       const correctAnsCount = Math.round(score / 5);
       const wrongAnsCount = 20 - correctAnsCount;
-      const idNo = record.idNo || "HS-2026-기록없음";
+      const recYear = record.year || (record.date ? parseInt(record.date.split('-')[0], 10) : new Date().getFullYear());
+      const idNo = record.idNo || `HS-${recYear}-기록없음`;
 
       const row = [
+        `"${recYear}년"`,
         `"${idNo}"`,
         `"${record.name.replace(/"/g, '""')}"`,
         `"${record.dept.replace(/"/g, '""')}"`,
@@ -530,9 +827,128 @@ export default function App() {
     document.body.removeChild(link);
   };
 
+  // 시험지 DOC 파일 저장 (Word / HWP 호환)
+  const handleDownloadExamDoc = () => {
+    const yearText = examPaperYear || new Date().getFullYear().toString();
+    const title = `${yearText}년도 국순당 HACCP 및 선행요건 정기 위생교육 평가 시험지`;
+    
+    let content = `
+    <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+    <head>
+      <meta charset='utf-8'>
+      <title>${title}</title>
+      <style>
+        body { font-family: 'Malgun Gothic', '맑은 고딕', sans-serif; padding: 20px; line-height: 1.6; color: #1c1c1c; }
+        h1 { text-align: center; font-size: 18pt; margin-bottom: 4px; color: #1c1c1c; font-weight: bold; }
+        .company-tag { text-align: center; font-size: 10pt; color: #e85b24; font-weight: bold; letter-spacing: 2px; margin-bottom: 15px; }
+        table.header-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        table.header-table td, table.header-table th { border: 1px solid #333; padding: 6px; text-align: center; font-size: 10pt; }
+        .instructions { background: #f8f8f8; border: 1px solid #ccc; padding: 10px; margin-bottom: 20px; font-size: 9.5pt; }
+        .q-item { margin-bottom: 18px; page-break-inside: avoid; }
+        .q-title { font-weight: bold; font-size: 11pt; margin-bottom: 6px; }
+        .q-options { margin-left: 15px; font-size: 10pt; }
+        .q-opt { margin-bottom: 3px; }
+        .ans-key { background: #e8f5e9; border: 1px solid #4caf50; padding: 6px 10px; margin-top: 6px; font-size: 9.5pt; color: #1b5e20; border-radius: 4px; }
+      </style>
+    </head>
+    <body>
+      <div class="company-tag">KOOKSOONDANG | 주식회사 국순당</div>
+      <h1>${title}</h1>
+      
+      <table class="header-table">
+        <tr>
+          <th width="15%">소 속</th>
+          <td width="25%"></td>
+          <th width="15%">성 명</th>
+          <td width="25%"></td>
+          <th width="10%">결 재</th>
+          <td width="10%">담당 / 팀장</td>
+        </tr>
+        <tr>
+          <th>평가 일자</th>
+          <td>${yearText}년 ___월 ___일</td>
+          <th>평가 점수</th>
+          <td>_____ 점 / 100점</td>
+          <th>판 정</th>
+          <td>[합격 / 불합격]</td>
+        </tr>
+      </table>
+
+      <div class="instructions">
+        <b>[평가 안내사항]</b><br>
+        1. 본 시험은 ${yearText}년도 HACCP 및 선행요건 정기 위생교육 이수자를 대상으로 실시하는 내부 평가입니다.<br>
+        2. 총 20문항이며, 각 문항당 배점은 5점입니다. (70점 이상 합격)<br>
+        3. 각 문항을 읽고 가장 알맞은 답의 번호를 하나 골라 선택하시오.
+      </div>
+
+      ${haccpQuestions.map((q, idx) => `
+        <div class="q-item">
+          <div class="q-title">${idx + 1}. ${q.text}</div>
+          <div class="q-options">
+            ${q.options.map((opt, oIdx) => `
+              <div class="q-opt">
+                ${oIdx + 1}) ${opt} ${examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 ? '<b style="color:#2e7d32;">[★ 정답]</b>' : ''}
+              </div>
+            `).join('')}
+          </div>
+          ${examPaperType === 'teacher' ? `
+            <div class="ans-key">
+              <b>[정답: ${q.correctAnswer}번]</b> ${q.explanation}
+            </div>
+          ` : ''}
+        </div>
+      `).join('')}
+    </body>
+    </html>
+    `;
+
+    const blob = new Blob(['\ufeff' + content], { type: 'application/msword;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${yearText}년도_국순당_HACCP_위생교육_평가시험지${examPaperType === 'teacher' ? '_해답지' : ''}.doc`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // 시험지 TXT 파일 저장
+  const handleDownloadExamTxt = () => {
+    const yearText = examPaperYear || new Date().getFullYear().toString();
+    let txt = `=================================================================\n`;
+    txt += `[주식회사 국순당] ${yearText}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지\n`;
+    txt += `=================================================================\n`;
+    txt += `소속: _______________   성명: _______________   일자: ${yearText}년 ___월 ___일\n`;
+    txt += `점수: _____점 / 100점    판정: [ 합격 / 불합격 ]\n`;
+    txt += `-----------------------------------------------------------------\n\n`;
+
+    haccpQuestions.forEach((q, idx) => {
+      txt += `${idx + 1}. ${q.text}\n`;
+      q.options.forEach((opt, oIdx) => {
+        txt += `   ${oIdx + 1}) ${opt}${examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 ? ' [★ 정답]' : ''}\n`;
+      });
+      if (examPaperType === 'teacher') {
+        txt += `   [정답: ${q.correctAnswer}번] ${q.explanation}\n`;
+      }
+      txt += `\n`;
+    });
+
+    const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${yearText}년도_국순당_HACCP_위생교육_평가시험지${examPaperType === 'teacher' ? '_해답지' : ''}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const handleExitExam = () => {
     setIsExamStarted(false);
     setIsSubmitted(false);
+    setIsReexamMode(false);
     setAnswers({});
     setExaminee(prev => ({
       ...prev,
@@ -566,7 +982,17 @@ export default function App() {
             </span>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            {!isAdminMode && (
+              <button
+                onClick={() => setShowAdminPinModal(true)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-stone-600 hover:text-stone-900 hover:bg-stone-100 border border-stone-200 transition-colors cursor-pointer"
+                title="관리자 모드 (PIN: 5678)"
+              >
+                <Lock size={13} className="text-stone-500" />
+                <span className="text-[11px] font-semibold">관리자</span>
+              </button>
+            )}
             <button
               onClick={() => setShowCheatSheet(!showCheatSheet)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-stone-600 hover:bg-stone-100 border border-stone-200 transition-colors"
@@ -709,22 +1135,82 @@ service cloud.firestore {
               </div>
             )}
 
+            {/* Reexam Approval Toast Notification */}
+            {reexamApprovalToast && (
+              <div className="bg-[#0F5A3E] text-white px-4 py-3 rounded-2xl flex items-center justify-between shadow-md text-xs font-bold animate-in fade-in duration-200">
+                <span className="flex items-center gap-2">
+                  <CheckCircle2 size={16} className="text-emerald-300" />
+                  {reexamApprovalToast}
+                </span>
+                <button 
+                  onClick={() => setReexamApprovalToast(null)} 
+                  className="text-white/80 hover:text-white cursor-pointer p-1"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+
+            {/* Pending Reexam Notification Banner */}
+            {(() => {
+              const pendingCount = examHistory.filter(r => r.score < passingScoreThreshold && !r.reexamApproved).length;
+              if (pendingCount > 0 && statusFilter !== 'reexam_pending') {
+                return (
+                  <div className="bg-amber-50/90 border border-amber-200 p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-xl bg-amber-100 border border-amber-200 flex items-center justify-center text-amber-800 shrink-0">
+                        <Clock3 size={18} />
+                      </div>
+                      <div>
+                        <div className="text-xs font-bold text-amber-900">
+                          재시험 승인 대기 응시자 <span className="underline decoration-amber-500 font-mono text-amber-800 text-sm">{pendingCount}명</span>
+                        </div>
+                        <div className="text-[11px] text-amber-700">
+                          HACCP 평가 규정상 70점 미만 응시자는 관리자의 사전 승인 후에만 동일 문항으로 재시험을 치를 수 있습니다.
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setStatusFilter('reexam_pending')}
+                      className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer shrink-0 shadow-2xs"
+                    >
+                      대기자 목록 및 승인하기
+                    </button>
+                  </div>
+                );
+              }
+              return null;
+            })()}
+
             {/* 2. Admin Stats Grid */}
             {(() => {
-              const total = examHistory.length;
-              const passed = examHistory.filter(r => r.score >= 70).length;
-              const reexam = examHistory.filter(r => r.score >= 50 && r.score < 70).length;
-              const retrain = examHistory.filter(r => r.score < 50).length;
+              const yearsSet = new Set<number>();
+              examHistory.forEach(r => {
+                const y = r.year || (r.date ? parseInt(r.date.split('-')[0], 10) : new Date().getFullYear());
+                if (!isNaN(y)) yearsSet.add(y);
+              });
+              yearsSet.add(new Date().getFullYear());
+              const availableYears = Array.from(yearsSet).sort((a, b) => b - a);
+
+              const yearFilteredHistory = examHistory.filter(record => {
+                const recordYear = record.year || (record.date ? parseInt(record.date.split('-')[0], 10) : new Date().getFullYear());
+                return yearFilter === 'all' ? true : recordYear === parseInt(yearFilter, 10);
+              });
+
+              const total = yearFilteredHistory.length;
+              const passed = yearFilteredHistory.filter(r => r.score >= 70).length;
+              const reexam = yearFilteredHistory.filter(r => r.score >= 50 && r.score < 70).length;
+              const retrain = yearFilteredHistory.filter(r => r.score < 50).length;
               const passRate = total > 0 ? Math.round((passed / total) * 100) : 0;
               const average = total > 0 
-                ? Math.round((examHistory.reduce((acc, r) => acc + r.score, 0) / total) * 10) / 10 
+                ? Math.round((yearFilteredHistory.reduce((acc, r) => acc + r.score, 0) / total) * 10) / 10 
                 : 0;
 
               return (
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                   <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-xs flex items-center justify-between">
                     <div>
-                      <span className="text-xs text-stone-400 block font-sans font-medium">총 응시 건수</span>
+                      <span className="text-xs text-stone-400 block font-sans font-medium">총 응시 건수 {yearFilter !== 'all' ? `(${yearFilter}년도)` : ''}</span>
                       <span className="text-2xl font-mono font-bold text-stone-800 block mt-1">{total}건</span>
                     </div>
                     <div className="p-3 bg-stone-50 rounded-xl text-stone-500">
@@ -771,83 +1257,126 @@ service cloud.firestore {
             })()}
 
             {/* 3. Search & Control Bar */}
-            <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-sm space-y-4">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                <div className="flex-1 flex flex-col sm:flex-row gap-2.5">
-                  <div className="relative flex-1">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400">
-                      <Search size={16} />
-                    </span>
-                    <input
-                      type="text"
-                      placeholder="평가자 성명 또는 소속 부서 검색..."
-                      value={searchQuery}
-                      onChange={e => setSearchQuery(e.target.value)}
-                      className="w-full pl-9 pr-3 py-2 bg-stone-50 border border-stone-250 rounded-xl text-xs focus:outline-hidden focus:ring-2 focus:ring-emerald-800 focus:bg-white transition-all text-stone-800 placeholder-stone-400"
-                    />
-                  </div>
-                  <select
-                    value={statusFilter}
-                    onChange={e => setStatusFilter(e.target.value as any)}
-                    className="px-3 py-2 bg-stone-50 border border-stone-250 rounded-xl text-xs text-stone-700 focus:outline-hidden focus:ring-2 focus:ring-emerald-800 focus:bg-white transition-all cursor-pointer"
-                  >
-                    <option value="all">전체 평가 판정 결과</option>
-                    <option value="passed">합격 (70점 이상)</option>
-                    <option value="reexam">재시험 대상 (50점 ~ 69점)</option>
-                    <option value="retrain">재교육 대상 (50점 미만)</option>
-                  </select>
-                </div>
-                
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={downloadExcelReport}
-                    className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-                  >
-                    <FileSpreadsheet size={14} />
-                    Excel 내보내기 (.csv)
-                  </button>
-                  
-                  <div className="flex items-center gap-1.5 bg-stone-50 border border-stone-250 rounded-xl px-2.5 py-1">
-                    <span className="text-[11px] text-stone-500 font-sans font-medium">더미 생성:</span>
-                    <input
-                      type="number"
-                      min="1"
-                      max="100"
-                      value={dummyCountInput}
-                      onChange={e => setDummyCountInput(e.target.value)}
-                      className="w-10 text-[11px] font-mono font-bold bg-transparent text-center border-b border-stone-300 focus:outline-hidden text-stone-800"
-                    />
-                    <button
-                      onClick={() => {
-                        const count = parseInt(dummyCountInput, 10);
-                        if (isNaN(count) || count <= 0) {
-                          alert("올바른 개수를 입력하세요.");
-                          return;
-                        }
-                        handleAddSampleDataOfCount(count);
-                      }}
-                      className="px-2 py-0.5 bg-stone-200 hover:bg-stone-300 text-stone-700 text-[11px] font-bold rounded-md cursor-pointer"
-                    >
-                      생성
-                    </button>
-                  </div>
+            {(() => {
+              const yearsSet = new Set<number>();
+              examHistory.forEach(r => {
+                const y = r.year || (r.date ? parseInt(r.date.split('-')[0], 10) : new Date().getFullYear());
+                if (!isNaN(y)) yearsSet.add(y);
+              });
+              yearsSet.add(new Date().getFullYear());
+              const availableYears = Array.from(yearsSet).sort((a, b) => b - a);
 
-                  {examHistory.length > 0 && (
-                    <button
-                      onClick={handleClearHistory}
-                      className="p-2 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer border border-transparent hover:border-red-100"
-                      title="전체 데이터 삭제"
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  )}
+              return (
+                <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-sm space-y-4">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div className="flex-1 flex flex-col sm:flex-row gap-2.5">
+                      <div className="relative flex-1">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400">
+                          <Search size={16} />
+                        </span>
+                        <input
+                          type="text"
+                          placeholder="평가자 성명 또는 소속 부서 검색..."
+                          value={searchQuery}
+                          onChange={e => setSearchQuery(e.target.value)}
+                          className="w-full pl-9 pr-3 py-2 bg-stone-50 border border-stone-250 rounded-xl text-xs focus:outline-hidden focus:ring-2 focus:ring-emerald-800 focus:bg-white transition-all text-stone-800 placeholder-stone-400"
+                        />
+                      </div>
+
+                      {/* Year Filter Dropdown */}
+                      <select
+                        value={yearFilter}
+                        onChange={e => setYearFilter(e.target.value)}
+                        className="px-3 py-2 bg-emerald-50/70 border border-emerald-200 rounded-xl text-xs text-emerald-900 font-bold focus:outline-hidden focus:ring-2 focus:ring-emerald-800 cursor-pointer"
+                      >
+                        <option value="all">📅 전체 연도 (통합)</option>
+                        {availableYears.map(year => (
+                          <option key={year} value={year.toString()}>{year}년도 평가</option>
+                        ))}
+                      </select>
+
+                      <select
+                        value={statusFilter}
+                        onChange={e => setStatusFilter(e.target.value as any)}
+                        className="px-3 py-2 bg-stone-50 border border-stone-250 rounded-xl text-xs text-stone-700 focus:outline-hidden focus:ring-2 focus:ring-emerald-800 focus:bg-white transition-all cursor-pointer"
+                      >
+                        <option value="all">전체 평가 판정 결과</option>
+                        <option value="passed">합격 (70점 이상)</option>
+                        <option value="reexam">재시험 대상 (50점 ~ 69점)</option>
+                        <option value="retrain">재교육 대상 (50점 미만)</option>
+                        <option value="reexam_pending">⏳ 재시험 승인 대기자 ({examHistory.filter(r => r.score < passingScoreThreshold && !r.reexamApproved).length}명)</option>
+                        <option value="reexam_approved">✅ 재시험 승인 완료자 ({examHistory.filter(r => r.score < passingScoreThreshold && r.reexamApproved).length}명)</option>
+                      </select>
+                    </div>
+                    
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => {
+                          setExamPaperYear(yearFilter === 'all' ? new Date().getFullYear().toString() : yearFilter);
+                          setShowExamPaperModal(true);
+                        }}
+                        className="px-4 py-2 bg-stone-800 hover:bg-stone-900 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                        title="해당 연도의 시험지 인쇄 및 파일 저장"
+                      >
+                        <Printer size={14} />
+                        시험지 출력 / 파일 저장
+                      </button>
+
+                      <button
+                        onClick={downloadExcelReport}
+                        className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                      >
+                        <FileSpreadsheet size={14} />
+                        Excel 내보내기 (.csv)
+                      </button>
+                      
+                      <div className="flex items-center gap-1.5 bg-stone-50 border border-stone-250 rounded-xl px-2.5 py-1">
+                        <span className="text-[11px] text-stone-500 font-sans font-medium">더미 생성:</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="100"
+                          value={dummyCountInput}
+                          onChange={e => setDummyCountInput(e.target.value)}
+                          className="w-10 text-[11px] font-mono font-bold bg-transparent text-center border-b border-stone-300 focus:outline-hidden text-stone-800"
+                        />
+                        <button
+                          onClick={() => {
+                            const count = parseInt(dummyCountInput, 10);
+                            if (isNaN(count) || count <= 0) {
+                              alert("올바른 개수를 입력하세요.");
+                              return;
+                            }
+                            handleAddSampleDataOfCount(count);
+                          }}
+                          className="px-2 py-0.5 bg-stone-200 hover:bg-stone-300 text-stone-700 text-[11px] font-bold rounded-md cursor-pointer"
+                        >
+                          생성
+                        </button>
+                      </div>
+
+                      {examHistory.length > 0 && (
+                        <button
+                          onClick={handleClearHistory}
+                          disabled={isClearingHistory}
+                          className="px-3.5 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-50"
+                          title="모든 응시자 시험 이력 영구 삭제 및 완전 초기화"
+                        >
+                          <Trash2 size={14} />
+                          {isClearingHistory ? "초기화 중..." : "전체 이력 초기화"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
+              );
+            })()}
 
             {/* 4. Examinee List */}
             {(() => {
               const filtered = examHistory.filter(record => {
+                const recordYear = record.year || (record.date ? parseInt(record.date.split('-')[0], 10) : new Date().getFullYear());
+
                 const matchesSearch = 
                   record.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
                   record.dept.toLowerCase().includes(searchQuery.toLowerCase());
@@ -856,17 +1385,24 @@ service cloud.firestore {
                   statusFilter === 'all' ? true :
                   statusFilter === 'passed' ? record.score >= 70 :
                   statusFilter === 'reexam' ? record.score >= 50 && record.score < 70 :
-                  statusFilter === 'retrain' ? record.score < 50 : true;
+                  statusFilter === 'retrain' ? record.score < 50 :
+                  statusFilter === 'reexam_pending' ? record.score < passingScoreThreshold && !record.reexamApproved :
+                  statusFilter === 'reexam_approved' ? record.score < passingScoreThreshold && !!record.reexamApproved : true;
+
+                const matchesYear = 
+                  yearFilter === 'all' ? true : recordYear === parseInt(yearFilter, 10);
                   
-                return matchesSearch && matchesStatus;
+                return matchesSearch && matchesStatus && matchesYear;
               });
 
               if (filtered.length === 0) {
                 return (
                   <div className="bg-white rounded-2xl p-12 text-center text-stone-400 border border-stone-200">
                     <User className="mx-auto text-stone-300 mb-3" size={48} />
-                    <p className="text-sm font-sans font-medium">조건에 만족하는 응시자 결과가 없습니다.</p>
-                    <p className="text-xs mt-1 font-sans">검색어 또는 필터를 변경하거나 더미 데이터를 입력해보세요.</p>
+                    <p className="text-sm font-sans font-medium">
+                      선택하신 조건({yearFilter !== 'all' ? `${yearFilter}년도` : '전체 연도'})에 만족하는 응시자 결과가 없습니다.
+                    </p>
+                    <p className="text-xs mt-1 font-sans">연도 필터나 검색어, 판정 결과를 변경해보세요.</p>
                   </div>
                 );
               }
@@ -874,14 +1410,22 @@ service cloud.firestore {
               return (
                 <div className="space-y-4">
                   {filtered.map((record, index) => {
-                    const recordKey = record.idNo || `HS-${index}`;
+                    const recordKey = record.id || record.idNo || `HS-${index}`;
                     const isExpanded = expandedRecords[recordKey];
                     const recordStatus = record.score >= 70 ? "passed" : record.score >= 50 ? "reexam" : "retrain";
+                    const recYear = record.year || (record.date ? record.date.split('-')[0] : '2026');
+                    const isTargetForReexam = record.score < passingScoreThreshold;
+                    const isApproved = !!record.reexamApproved;
+                    const actionTargetKey = record.id || record.idNo || record.name;
 
                     return (
                       <div 
                         key={recordKey}
-                        className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs hover:shadow-sm transition-all"
+                        className={`bg-white rounded-2xl border overflow-hidden shadow-xs hover:shadow-sm transition-all ${
+                          isTargetForReexam && !isApproved 
+                            ? 'border-amber-200/90' 
+                            : 'border-stone-200'
+                        }`}
                       >
                         {/* Summary Block */}
                         <div 
@@ -892,15 +1436,71 @@ service cloud.firestore {
                             <div className="flex items-center flex-wrap gap-2">
                               <span className="font-bold text-sm text-stone-850">{record.name}</span>
                               <span className="text-xs text-stone-500">| {record.dept}</span>
+                              <span className="text-[10px] bg-stone-100 text-stone-600 px-2 py-0.5 rounded-md font-bold font-mono">
+                                {recYear}년도
+                              </span>
+                              {record.isReexam && (
+                                <span className="text-[10px] bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-md font-bold">
+                                  2차 재시험
+                                </span>
+                              )}
                               <span className="text-[10px] text-stone-400 font-mono">({record.idNo || 'ID 없음'})</span>
                             </div>
                             <div className="flex items-center gap-3 text-xs text-stone-450 font-sans">
                               <span>응시일: {record.date}</span>
+                              {record.round && (
+                                <span>차수: {record.round}차</span>
+                              )}
                             </div>
                           </div>
 
-                          <div className="flex items-center justify-between sm:justify-end gap-5">
-                            <div className="text-right">
+                          <div className="flex flex-wrap items-center justify-between sm:justify-end gap-3 sm:gap-5">
+                            {/* Reexam Admin Approval Action Area */}
+                            {isTargetForReexam ? (
+                              <div 
+                                className="flex items-center gap-1.5"
+                                onClick={e => e.stopPropagation()}
+                              >
+                                {isApproved ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 shadow-2xs">
+                                      <UserCheck size={13} />
+                                      재시험 승인됨
+                                    </span>
+                                    <button
+                                      disabled={approvalActionLoading === actionTargetKey}
+                                      onClick={() => handleToggleReexamApproval(record)}
+                                      className="px-2.5 py-1 text-[11px] font-medium text-stone-500 hover:text-red-600 hover:bg-red-50 border border-stone-200 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                                      title="재시험 승인 취소"
+                                    >
+                                      승인 취소
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-200 shadow-2xs">
+                                      <Clock3 size={13} />
+                                      승인 대기
+                                    </span>
+                                    <button
+                                      disabled={approvalActionLoading === actionTargetKey}
+                                      onClick={() => handleToggleReexamApproval(record)}
+                                      className="px-3 py-1 text-[11px] font-bold bg-[#0F5A3E] hover:bg-emerald-800 text-white rounded-lg transition-colors shadow-2xs cursor-pointer flex items-center gap-1 disabled:opacity-50"
+                                      title="동일 문항 재시험 승인"
+                                    >
+                                      <CheckCircle2 size={13} />
+                                      재시험 승인
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-[11px] text-stone-400 font-sans hidden sm:inline-block">
+                                합격 완료 (재시험 불필요)
+                              </span>
+                            )}
+
+                            <div className="text-right shrink-0">
                               <div className="flex items-center gap-1.5">
                                 <span className="text-lg font-mono font-bold text-stone-800">{record.score}점</span>
                                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
@@ -914,6 +1514,16 @@ service cloud.firestore {
                                 </span>
                               </div>
                             </div>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteSingleRecord(record);
+                              }}
+                              className="p-1.5 text-stone-350 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                              title="해당 응시자 기록 삭제 (새로 응시할 수 있도록 초기화)"
+                            >
+                              <Trash2 size={15} />
+                            </button>
                             <div className={`p-1.5 rounded-lg text-stone-400 hover:text-stone-700 transition-colors ${isExpanded ? 'rotate-180' : ''}`}>
                               <ChevronDown size={18} className="transition-transform duration-200" />
                             </div>
@@ -923,6 +1533,43 @@ service cloud.firestore {
                         {/* Detailed Dropdown Panel (각 문항별 정오답 여부) */}
                         {isExpanded && (
                           <div className="border-t border-stone-150 p-4 md:p-5 bg-stone-50/50 space-y-4">
+                            {/* Reexam Status Detail Box */}
+                            {isTargetForReexam && (
+                              <div className={`p-3 rounded-xl border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
+                                isApproved 
+                                  ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900' 
+                                  : 'bg-amber-50/70 border-amber-200 text-amber-900'
+                              }`}>
+                                <div className="flex items-center gap-2">
+                                  {isApproved ? (
+                                    <CheckCircle2 size={16} className="text-emerald-700 shrink-0" />
+                                  ) : (
+                                    <Clock3 size={16} className="text-amber-700 shrink-0" />
+                                  )}
+                                  <div>
+                                    <span className="font-bold">
+                                      {isApproved ? '관리자 재시험 승인 완료 상태' : '관리자 재시험 승인 대기 상태'}
+                                    </span>
+                                    <span className="text-[11px] block text-stone-600">
+                                      {isApproved 
+                                        ? '응시자는 시작 화면에서 처음 시험과 동일한 20문제로 즉시 재시험을 응시할 수 있습니다.' 
+                                        : '응시자가 재시험을 치르려면 관리자의 승인이 필요합니다.'}
+                                    </span>
+                                  </div>
+                                </div>
+                                <button
+                                  disabled={approvalActionLoading === actionTargetKey}
+                                  onClick={() => handleToggleReexamApproval(record)}
+                                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                                    isApproved 
+                                      ? 'bg-white border border-stone-300 text-stone-600 hover:bg-stone-100 hover:text-red-600' 
+                                      : 'bg-[#0F5A3E] text-white hover:bg-emerald-800 shadow-2xs'
+                                  }`}
+                                >
+                                  {isApproved ? '승인 취소하기' : '지금 재시험 승인하기'}
+                                </button>
+                              </div>
+                            )}
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-stone-200/60 pb-3">
                               <div className="flex items-center gap-1.5 text-xs font-bold text-stone-700">
                                 <FileText size={14} className="text-emerald-800" />
@@ -988,69 +1635,196 @@ service cloud.firestore {
                   </p>
                 </div>
 
-                {myLocalExamRecord !== null ? (
-                  <div className="p-6 md:p-8 space-y-6">
-                    <div className="bg-red-50 text-red-800 text-xs p-4 rounded-xl border border-red-100 flex items-start gap-2.5 leading-relaxed">
-                      <AlertTriangle className="text-red-600 shrink-0 mt-0.5" size={18} />
-                      <div>
-                        <p className="font-semibold text-red-900 text-sm">평가 응시 완료 (재도전 불가)</p>
-                        <p className="mt-1 text-red-700">
-                          귀하는 이미 본 HACCP 내부평가에 응시하셨습니다.
-                        </p>
-                        <p className="mt-0.5">
-                          HACCP 내부 관리 규정에 따라 본 평가는 <strong className="font-bold text-red-900">단 1회만 응시 가능</strong>하며, 추가적인 재시험이나 재도전은 엄격히 금지됩니다.
-                        </p>
-                      </div>
-                    </div>
+                {myLocalExamRecord !== null ? (() => {
+                  const latestRecord = examHistory.find(r => 
+                    (myLocalExamRecord.id && r.id === myLocalExamRecord.id) ||
+                    (myLocalExamRecord.idNo && r.idNo === myLocalExamRecord.idNo) ||
+                    (r.name === myLocalExamRecord.name && r.dept === myLocalExamRecord.dept)
+                  ) || myLocalExamRecord;
 
-                    <div className="border border-stone-200 rounded-xl p-5 bg-stone-50/50 space-y-3 relative overflow-hidden">
-                      <div className="absolute -right-4 -bottom-4 w-28 h-28 border-4 border-double rounded-full opacity-10 flex items-center justify-center rotate-12">
-                        <span className="font-bold text-lg font-sans">완료</span>
-                      </div>
-                      
-                      <h3 className="font-semibold text-stone-800 text-sm border-b border-stone-200 pb-2 mb-3 font-sans">최종 응시 기록</h3>
-                      <div className="grid grid-cols-2 gap-y-2.5 gap-x-4 text-xs text-stone-600">
-                        <div>
-                          <span className="text-stone-400 block font-medium">성명</span>
-                          <span className="font-semibold text-stone-800 text-sm">{myLocalExamRecord.name}</span>
+                  const isCandidatePassed = latestRecord.score >= passingScoreThreshold;
+                  const isReexamApproved = !!latestRecord.reexamApproved;
+
+                  return (
+                    <div className="p-6 md:p-8 space-y-6">
+                      {/* Status Banner */}
+                      {isCandidatePassed ? (
+                        <div className="bg-emerald-50 text-emerald-900 text-xs p-4 rounded-xl border border-emerald-200 flex items-start gap-3 leading-relaxed">
+                          <CheckCircle2 className="text-emerald-700 shrink-0 mt-0.5" size={20} />
+                          <div className="space-y-1">
+                            <p className="font-bold text-emerald-950 text-sm">2026년도 HACCP 내부평가 최종 합격</p>
+                            <p className="text-emerald-800">
+                              귀하는 종합 점수 <strong className="font-bold text-emerald-950 font-mono">{latestRecord.score}점</strong>으로 합격 기준({passingScoreThreshold}점)을 충족하여 우수한 성적으로 평가를 완료하셨습니다.
+                            </p>
+                            <p className="text-emerald-700 text-[11px]">
+                              ※ HACCP 내부 규정에 따라 합격자는 추가 재응시가 불필요합니다.
+                            </p>
+                          </div>
                         </div>
-                        <div>
-                          <span className="text-stone-400 block font-medium">소속 부서 / 팀</span>
-                          <span className="font-semibold text-stone-800 text-sm">{myLocalExamRecord.dept}</span>
+                      ) : isReexamApproved ? (
+                        <div className="bg-emerald-50 text-emerald-900 text-xs p-4 rounded-xl border border-emerald-300 flex items-start gap-3 leading-relaxed shadow-2xs">
+                          <CheckCircle2 className="text-emerald-700 shrink-0 mt-0.5" size={20} />
+                          <div className="space-y-1.5">
+                            <div className="flex items-center gap-2">
+                              <p className="font-bold text-emerald-950 text-sm">관리자 재시험 승인 완료</p>
+                              <span className="px-2 py-0.5 bg-emerald-200/80 text-emerald-900 rounded-md font-bold text-[10px]">
+                                재시험 가능
+                              </span>
+                            </div>
+                            <p className="text-emerald-800 leading-normal">
+                              관리자(품질보증/위생관리팀)의 재시험 승인이 완료되었습니다.
+                            </p>
+                            <div className="bg-white/80 p-2.5 rounded-lg border border-emerald-200 text-[11px] text-emerald-900 font-medium">
+                              ※ <strong>처음 시험문제와 완전히 동일한 20문항</strong>으로 재시험이 진행됩니다. 준비를 마치신 후 아래 [재시험 시작] 버튼을 눌러주십시오.
+                            </div>
+                          </div>
                         </div>
-                        <div>
-                          <span className="text-stone-400 block font-medium">수험 번호</span>
-                          <span className="font-mono text-stone-700">{myLocalExamRecord.idNo || 'HS-2026-7713'}</span>
+                      ) : (
+                        <div className="bg-amber-50 text-amber-900 text-xs p-4 rounded-xl border border-amber-200 flex items-start gap-3 leading-relaxed">
+                          <Clock3 className="text-amber-700 shrink-0 mt-0.5" size={20} />
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <p className="font-bold text-amber-950 text-sm">재시험 대상자 (관리자 승인 대기 중)</p>
+                              <span className="px-2 py-0.5 bg-amber-200/80 text-amber-900 rounded-md font-bold text-[10px]">
+                                승인 필요
+                              </span>
+                            </div>
+                            <p className="text-amber-800">
+                              귀하는 1차 평가 점수 <strong className="font-bold text-amber-950 font-mono">{latestRecord.score}점</strong>으로 재시험 대상입니다.
+                            </p>
+                            <p className="text-amber-800">
+                              HACCP 사내 규정에 따라 <strong className="font-bold underline decoration-amber-600">관리자(품질보증/위생관리팀)의 사전 승인</strong>이 완료되어야만 재시험에 응시하실 수 있습니다.
+                            </p>
+                            <p className="text-stone-500 text-[11px] pt-1">
+                              관리자에게 승인을 요청하신 뒤, 승인이 완료되면 본 화면에서 재시험을 시작하실 수 있습니다.
+                            </p>
+                          </div>
                         </div>
+                      )}
+
+                      {/* Reexam Start Button / Refresh Button */}
+                      {!isCandidatePassed && (
                         <div>
-                          <span className="text-stone-400 block font-medium">평가 완료일</span>
-                          <span className="text-stone-700">{myLocalExamRecord.date}</span>
+                          {isReexamApproved ? (
+                            <button
+                              onClick={handleStartReexam}
+                              className="w-full py-3.5 bg-[#0F5A3E] hover:bg-emerald-800 text-white font-bold text-sm rounded-xl shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
+                            >
+                              <FileCheck size={18} />
+                              2026년도 HACCP 재시험 시작하기 (처음 시험과 동일 문항)
+                            </button>
+                          ) : (
+                            <div className="space-y-2">
+                              <button
+                                disabled
+                                className="w-full py-3 bg-stone-200 text-stone-400 font-bold text-xs rounded-xl flex items-center justify-center gap-2 cursor-not-allowed"
+                              >
+                                <Clock3 size={15} />
+                                관리자 승인 후 재시험 응시 가능
+                              </button>
+                              <button
+                                onClick={() => {
+                                  if (latestRecord.reexamApproved) {
+                                    alert("관리자 재시험 승인이 완료되었습니다! 즉시 재시험을 시작할 수 있습니다.");
+                                  } else {
+                                    alert("현재 관리자 승인 대기 중입니다. 관리자에게 승인을 요청해 주세요.");
+                                  }
+                                }}
+                                className="w-full py-2 bg-stone-50 hover:bg-stone-100 text-stone-700 border border-stone-250 font-semibold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                              >
+                                <Clock3 size={14} className="text-stone-500" />
+                                관리자 승인 상태 새로고침 / 확인
+                              </button>
+                            </div>
+                          )}
                         </div>
-                        <div className="col-span-2 border-t border-stone-150 pt-2.5 mt-1 flex justify-between items-center">
+                      )}
+
+                      {/* Candidate Record Card */}
+                      <div className="border border-stone-200 rounded-xl p-5 bg-stone-50/50 space-y-3 relative overflow-hidden">
+                        <div className="absolute -right-4 -bottom-4 w-28 h-28 border-4 border-double rounded-full opacity-10 flex items-center justify-center rotate-12">
+                          <span className="font-bold text-lg font-sans">완료</span>
+                        </div>
+                        
+                        <div className="flex items-center justify-between border-b border-stone-200 pb-2 mb-3">
+                          <h3 className="font-semibold text-stone-800 text-sm font-sans">최종 응시 기록</h3>
+                          {latestRecord.isReexam && (
+                            <span className="text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-full">
+                              2차 재시험 기록
+                            </span>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-y-2.5 gap-x-4 text-xs text-stone-600">
                           <div>
-                            <span className="text-stone-400 block font-medium">종합 평가 결과</span>
-                            <span className={`text-lg font-bold ${myLocalExamRecord.score >= 70 ? 'text-emerald-800' : myLocalExamRecord.score >= 50 ? 'text-amber-700' : 'text-red-600'}`}>
-                              {myLocalExamRecord.score}점 ({myLocalExamRecord.score >= 70 ? '합격' : myLocalExamRecord.score >= 50 ? '재시험' : '재교육'})
-                            </span>
+                            <span className="text-stone-400 block font-medium">성명</span>
+                            <span className="font-semibold text-stone-800 text-sm">{latestRecord.name}</span>
                           </div>
-                          
-                          {/* Circle Stamp */}
-                          <div className={`w-14 h-14 rounded-full border-2 ${
-                            myLocalExamRecord.score >= 70 
-                              ? 'border-emerald-600 text-emerald-700 bg-emerald-50/50' 
-                              : myLocalExamRecord.score >= 50 
-                                ? 'border-amber-600 text-amber-700 bg-amber-50/50' 
-                                : 'border-red-600 text-red-700 bg-red-50/50'
-                          } flex flex-col items-center justify-center font-bold text-[11px] rotate-12 shrink-0 shadow-xs`}>
-                            <span className="scale-90 font-extrabold font-sans">
-                              {myLocalExamRecord.score >= 70 ? '합격' : myLocalExamRecord.score >= 50 ? '재시험' : '재교육'}
-                            </span>
+                          <div>
+                            <span className="text-stone-400 block font-medium">소속 부서 / 팀</span>
+                            <span className="font-semibold text-stone-800 text-sm">{latestRecord.dept}</span>
                           </div>
+                          <div>
+                            <span className="text-stone-400 block font-medium">수험 번호</span>
+                            <span className="font-mono text-stone-700">{latestRecord.idNo || 'HS-2026-7713'}</span>
+                          </div>
+                          <div>
+                            <span className="text-stone-400 block font-medium">평가 완료일</span>
+                            <span className="text-stone-700">{latestRecord.date}</span>
+                          </div>
+                          <div className="col-span-2 border-t border-stone-150 pt-2.5 mt-1 flex justify-between items-center">
+                            <div>
+                              <span className="text-stone-400 block font-medium">종합 평가 결과</span>
+                              <span className={`text-lg font-bold ${latestRecord.score >= 70 ? 'text-emerald-800' : latestRecord.score >= 50 ? 'text-amber-700' : 'text-red-600'}`}>
+                                {latestRecord.score}점 ({latestRecord.score >= 70 ? '합격' : latestRecord.score >= 50 ? '재시험 대상' : '재교육 대상'})
+                              </span>
+                              {!isCandidatePassed && (
+                                <span className="block text-[11px] font-medium text-stone-500 mt-0.5">
+                                  재시험 승인: <strong className={isReexamApproved ? 'text-emerald-700' : 'text-amber-700'}>{isReexamApproved ? '승인 완료' : '관리자 승인 대기'}</strong>
+                                </span>
+                              )}
+                            </div>
+                            
+                            {/* Circle Stamp */}
+                            <div className={`w-14 h-14 rounded-full border-2 ${
+                              latestRecord.score >= 70 
+                                ? 'border-emerald-600 text-emerald-700 bg-emerald-50/50' 
+                                : latestRecord.score >= 50 
+                                  ? 'border-amber-600 text-amber-700 bg-amber-50/50' 
+                                  : 'border-red-600 text-red-700 bg-red-50/50'
+                            } flex flex-col items-center justify-center font-bold text-[11px] rotate-12 shrink-0 shadow-xs`}>
+                              <span className="scale-90 font-extrabold font-sans">
+                                {latestRecord.score >= 70 ? '합격' : latestRecord.score >= 50 ? '재시험' : '재교육'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Tester / Individual Reset Action Box */}
+                      <div className="pt-3 border-t border-stone-200">
+                        <div className="bg-stone-100/90 rounded-xl p-4 border border-stone-250 flex flex-col sm:flex-row items-center justify-between gap-3 text-left">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-1.5 font-bold text-stone-800 text-xs">
+                              <RotateCcw size={14} className="text-[#0F5A3E]" />
+                              <span>시험 문제 확인 및 모의 재응시 (기록 초기화)</span>
+                            </div>
+                            <p className="text-[11px] text-stone-600 leading-relaxed">
+                              테스트를 위해 본 기기에 저장된 이전 응시 이력을 지우고 새 시험지로 성명/부서를 다시 입력하여 시작하시겠습니까?
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleResetCurrentDeviceRecord}
+                            className="w-full sm:w-auto px-4 py-2.5 bg-white hover:bg-red-50 text-stone-700 hover:text-red-700 border border-stone-300 hover:border-red-300 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs shrink-0 whitespace-nowrap"
+                          >
+                            <Trash2 size={13} className="text-stone-400" />
+                            기기 기록 초기화 (다시 풀기)
+                          </button>
                         </div>
                       </div>
                     </div>
-                  </div>
-                ) : (
+                  );
+                })() : (
                   <form onSubmit={handleStartExam} className="p-6 md:p-8 space-y-5">
                     <div className="bg-amber-50/80 rounded-xl p-4 border border-amber-100 text-xs text-stone-700 leading-relaxed flex items-start gap-2.5">
                       <Info className="text-amber-600 shrink-0 mt-0.5" size={16} />
@@ -1221,6 +1995,19 @@ service cloud.firestore {
                     </div>
                   </div>
 
+                  {/* RE-EXAM MODE INDICATOR BANNER */}
+                  {isReexamMode && (
+                    <div className="bg-indigo-50 border border-indigo-200 text-indigo-900 px-4 py-2.5 rounded-xl text-xs flex items-center justify-between shadow-2xs">
+                      <div className="flex items-center gap-2 font-bold">
+                        <CheckCircle2 size={15} className="text-indigo-600 shrink-0" />
+                        <span>[2차 재시험 진행 중] 관리자 승인 완료 — 처음 시험과 완전히 동일한 20문항으로 출제되었습니다.</span>
+                      </div>
+                      <span className="text-[10px] bg-indigo-200/70 text-indigo-900 px-2 py-0.5 rounded font-mono font-bold shrink-0">
+                        2차 재시험
+                      </span>
+                    </div>
+                  )}
+
                   {/* SUBMISSION RESULT HEADER BANNER (IF SUBMITTED) */}
                   {isSubmitted && (
                     <motion.div
@@ -1248,8 +2035,12 @@ service cloud.firestore {
 
                         <div className="max-w-md mx-auto">
                           <Award className={`mx-auto mb-2 ${isPassed ? 'text-emerald-700' : 'text-amber-600'}`} size={44} />
-                          <h2 className="text-xl font-serif font-bold text-stone-900">채점 결과 리포트</h2>
-                          <p className="text-xs text-stone-500 mt-1">수고하셨습니다! 제출하신 HACCP 답안지가 정상 채점되었습니다.</p>
+                          <h2 className="text-xl font-serif font-bold text-stone-900">
+                            {isReexamMode ? "2차 재시험 채점 결과 리포트" : "채점 결과 리포트"}
+                          </h2>
+                          <p className="text-xs text-stone-500 mt-1">
+                            {isReexamMode ? "처음 시험과 동일한 문항으로 치러진 재시험이 정상 채점되었습니다." : "수고하셨습니다! 제출하신 HACCP 답안지가 정상 채점되었습니다."}
+                          </p>
                           
                           <div className="grid grid-cols-3 gap-3 my-6 bg-white rounded-xl p-4 border border-stone-200">
                             <div>
@@ -1287,12 +2078,12 @@ service cloud.firestore {
                                 <p className="text-xs text-red-600 flex flex-col items-center justify-center gap-1 font-medium bg-red-50/50 p-3.5 rounded-xl border border-red-100 leading-relaxed">
                                   <span className="flex items-center gap-1 text-sm font-bold">
                                     <AlertTriangle size={16} className="text-red-500" />
-                                    {finalScore < 50 ? "HACCP 재교육 대상" : "HACCP 오프라인 재평가 대상"}
+                                    {finalScore < 50 ? "HACCP 재교육 대상" : "HACCP 재평가 대상"}
                                   </span>
                                   <span className="text-center mt-1 max-w-md">
-                                    {finalScore < 50 
-                                      ? `합격 기준(${passingScoreThreshold}점)에 미달(50점 미만)하여 재교육 및 재평가 대상입니다. 본 온라인 평가는 단 1회만 응시 가능하므로, 추후 안내될 사내 HACCP 재교육 일정을 확인해 주시기 바랍니다.`
-                                      : `합격 기준(${passingScoreThreshold}점)에 미달(70점 미만)하여 오프라인 재평가 대상입니다. 본 온라인 평가는 단 1회만 응시 가능하므로, 오답 해설을 상세히 점검한 뒤 오프라인 재시험 일정을 대기해 주세요.`}
+                                    {isReexamMode 
+                                      ? `2차 재시험에서도 기준 점수(${passingScoreThreshold}점)에 도달하지 못했습니다. 추후 사내 위생품질관리 지침에 따라 별도 교육 일정을 안내해 드릴 예정입니다.`
+                                      : `합격 기준(${passingScoreThreshold}점) 미만으로 재평가 대상입니다. 사내 HACCP 평가 규정에 따라 관리자(품질보증/위생관리팀)의 승인을 받으시면 처음 시험과 동일한 문항으로 재시험에 응시하실 수 있습니다.`}
                                   </span>
                                 </p>
                                 <div className="flex justify-center gap-2">
@@ -1866,7 +2657,7 @@ service cloud.firestore {
                   <Lock size={22} className="animate-pulse" />
                 </div>
                 <h3 className="font-serif font-bold text-stone-900 text-lg">관리자 모드 비밀번호 입력</h3>
-                <p className="text-xs text-stone-400 mt-1">5초 이내에 비밀번호 5678을 입력해 주세요.</p>
+                <p className="text-xs text-stone-400 mt-1">5초 이내에 관리자 비밀번호를 입력해 주세요.</p>
               </div>
 
               {/* Countdown Progress Bar */}
@@ -2143,7 +2934,249 @@ service cloud.firestore {
             </motion.div>
           </div>
         )}
+
+        {/* Exam Paper Print / Download Modal */}
+        {showExamPaperModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs no-print">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl border border-stone-200 shadow-2xl max-w-4xl w-full p-6 space-y-4 relative flex flex-col max-h-[92vh]"
+            >
+              <button
+                type="button"
+                onClick={() => setShowExamPaperModal(false)}
+                className="absolute right-4 top-4 text-stone-400 hover:text-stone-600 p-1.5 hover:bg-stone-50 rounded-full transition-colors cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+
+              <div className="flex items-center gap-3 border-b border-stone-150 pb-3">
+                <div className="w-10 h-10 bg-stone-900 text-white rounded-xl flex items-center justify-center shrink-0">
+                  <Printer size={20} />
+                </div>
+                <div>
+                  <h3 className="font-serif font-bold text-lg text-stone-900">
+                    연도별 HACCP 평가 시험지 출력 및 파일 저장
+                  </h3>
+                  <p className="text-xs text-stone-500 font-sans mt-0.5">
+                    선택한 연도의 시험지를 인쇄(PDF 저장)하거나 Word/HWP, TXT 파일로 다운로드할 수 있습니다.
+                  </p>
+                </div>
+              </div>
+
+              {/* Controls bar inside modal */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-stone-50 p-3.5 rounded-xl border border-stone-200 text-xs">
+                {/* Year Select */}
+                <div className="flex items-center gap-2">
+                  <label className="font-bold text-stone-700 shrink-0">출력 연도 선택:</label>
+                  <select
+                    value={examPaperYear}
+                    onChange={e => setExamPaperYear(e.target.value)}
+                    className="flex-1 px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-bold text-emerald-900 focus:ring-2 focus:ring-emerald-800 focus:outline-hidden cursor-pointer"
+                  >
+                    {[2026].map(y => (
+                      <option key={y} value={y.toString()}>{y}년도 평가 시험지 (온라인 정식 시행)</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Exam Paper Type */}
+                <div className="flex items-center gap-2">
+                  <label className="font-bold text-stone-700 shrink-0">시험지 유형:</label>
+                  <div className="flex gap-1.5 flex-1">
+                    <button
+                      type="button"
+                      onClick={() => setExamPaperType('student')}
+                      className={`flex-1 py-1.5 px-2 rounded-lg font-medium text-xs transition-all cursor-pointer border ${
+                        examPaperType === 'student'
+                          ? 'bg-stone-900 text-white border-stone-900 font-bold'
+                          : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-100'
+                      }`}
+                    >
+                      📝 응시자용 (문제지)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExamPaperType('teacher')}
+                      className={`flex-1 py-1.5 px-2 rounded-lg font-medium text-xs transition-all cursor-pointer border ${
+                        examPaperType === 'teacher'
+                          ? 'bg-emerald-800 text-white border-emerald-800 font-bold'
+                          : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-100'
+                      }`}
+                    >
+                      💡 관리자/해답용 (정답&해설)
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Action Buttons Toolbar */}
+              <div className="flex flex-wrap items-center justify-between gap-2.5 bg-emerald-50/60 p-3 rounded-xl border border-emerald-100">
+                <span className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
+                  <Sparkles size={15} className="text-emerald-700" />
+                  내보내기 옵션 선택:
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => window.print()}
+                    className="px-3.5 py-2 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Printer size={14} />
+                    인쇄 및 PDF 저장
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadExamDoc}
+                    className="px-3.5 py-2 bg-stone-800 hover:bg-stone-900 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Download size={14} />
+                    Word/HWP 저장 (.doc)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadExamTxt}
+                    className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 text-xs font-semibold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <FileText size={14} />
+                    TXT 저장 (.txt)
+                  </button>
+                </div>
+              </div>
+
+              {/* Live Preview Paper */}
+              <div className="flex-1 overflow-y-auto bg-stone-50/70 rounded-xl p-6 border border-stone-250 font-serif text-stone-900 text-xs space-y-6 max-h-[48vh]">
+                <div className="text-center pb-4 border-b border-stone-300 space-y-1">
+                  <KooksoondangLogo className="scale-90 mb-1" />
+                  <h2 className="text-xl font-bold text-stone-900 mt-2">
+                    {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지
+                  </h2>
+                  <p className="text-[11px] text-stone-500 font-sans">
+                    {examPaperType === 'student' ? '[ 수험생 응시용 문제지 ]' : '[ 관리자용 정답 및 해설지 ]'}
+                  </p>
+                </div>
+
+                {/* Score & Examinee Box */}
+                <div className="bg-white p-3 border border-stone-300 rounded-lg shadow-2xs font-sans text-xs">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-center">
+                    <div className="p-1.5 bg-stone-50 rounded">소속: <span className="font-bold">_______________</span></div>
+                    <div className="p-1.5 bg-stone-50 rounded">성명: <span className="font-bold">_______________</span></div>
+                    <div className="p-1.5 bg-stone-50 rounded">일자: <span className="font-bold">{examPaperYear}년 ___월 ___일</span></div>
+                    <div className="p-1.5 bg-stone-50 rounded font-bold text-emerald-800">점수: ____ / 100점</div>
+                  </div>
+                </div>
+
+                {/* Questions Preview */}
+                <div className="space-y-5">
+                  {haccpQuestions.map((q, idx) => (
+                    <div key={q.id} className="bg-white p-4 rounded-xl border border-stone-200 shadow-2xs space-y-2">
+                      <p className="font-bold text-stone-900 text-sm">
+                        {idx + 1}. {q.text}
+                      </p>
+                      <div className="pl-3 space-y-1 text-stone-700 font-sans text-xs">
+                        {q.options.map((opt, oIdx) => (
+                          <div key={oIdx} className="flex items-start gap-1.5">
+                            <span className="font-semibold">{oIdx + 1})</span>
+                            <span className={examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 ? 'font-bold text-emerald-800 bg-emerald-50 px-1 rounded' : ''}>
+                              {opt}
+                              {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
+                                <span className="text-emerald-700 font-bold ml-1">[★ 정답]</span>
+                              )}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                      {examPaperType === 'teacher' && (
+                        <div className="mt-2 p-2.5 bg-emerald-50/80 border border-emerald-200 rounded-lg text-xs font-sans text-emerald-900 leading-relaxed">
+                          <span className="font-bold">[정답: {q.correctAnswer}번]</span> {q.explanation}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Close Footer */}
+              <div className="pt-2 border-t border-stone-150 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowExamPaperModal(false)}
+                  className="px-5 py-2.5 bg-stone-900 hover:bg-stone-850 text-white text-xs font-bold rounded-xl transition-all cursor-pointer"
+                >
+                  닫기
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
       </AnimatePresence>
+
+      {/* ----------------- PRINT ONLY EXAM PAPER CONTAINER FOR WINDOW.PRINT() ----------------- */}
+      <div className="print-only font-serif p-8 bg-white text-stone-900">
+        <div className="text-center mb-6">
+          <div className="text-xs font-bold tracking-widest text-stone-500 mb-1">KOOKSOONDANG | 주식회사 국순당</div>
+          <h1 className="text-2xl font-bold text-stone-900">{examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지</h1>
+          <p className="text-xs text-stone-500 font-sans mt-1">
+            {examPaperType === 'student' ? '[ 수험생 응시용 문제지 ]' : '[ 관리자용 정답 및 해설지 ]'}
+          </p>
+        </div>
+
+        <table className="w-full border-collapse border border-stone-900 text-center text-xs mb-6">
+          <tbody>
+            <tr>
+              <th className="border border-stone-900 bg-stone-100 p-2 font-bold" width="15%">소 속</th>
+              <td className="border border-stone-900 p-2" width="25%"></td>
+              <th className="border border-stone-900 bg-stone-100 p-2 font-bold" width="15%">성 명</th>
+              <td className="border border-stone-900 p-2" width="25%"></td>
+              <th className="border border-stone-900 bg-stone-100 p-2 font-bold" width="10%">결 재</th>
+              <td className="border border-stone-900 p-2 text-[10px]" width="10%">담당 / 팀장</td>
+            </tr>
+            <tr>
+              <th className="border border-stone-900 bg-stone-100 p-2 font-bold">평가 일자</th>
+              <td className="border border-stone-900 p-2">{examPaperYear}년 ___월 ___일</td>
+              <th className="border border-stone-900 bg-stone-100 p-2 font-bold">평가 점수</th>
+              <td className="border border-stone-900 p-2 font-mono">_____ 점 / 100점</td>
+              <th className="border border-stone-900 bg-stone-100 p-2 font-bold">판 정</th>
+              <td className="border border-stone-900 p-2 font-bold">[합격/불합격]</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div className="border border-stone-400 bg-stone-50 p-3.5 mb-6 text-xs leading-relaxed">
+          <p className="font-bold mb-1">[평가 안내사항]</p>
+          <p>1. 본 시험은 {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 이수자를 대상으로 실시하는 내부 평가입니다.</p>
+          <p>2. 총 20문항이며, 각 문항당 배점은 5점입니다. (70점 이상 합격)</p>
+          <p>3. 각 문항을 읽고 가장 알맞은 답의 번호를 하나 골라 표시하시오.</p>
+        </div>
+
+        <div className="space-y-5 text-sm">
+          {haccpQuestions.map((q, idx) => (
+            <div key={q.id} className="page-break-avoid">
+              <p className="font-bold text-stone-900 mb-1.5">{idx + 1}. {q.text}</p>
+              <div className="pl-4 space-y-1 text-xs text-stone-800">
+                {q.options.map((opt, oIdx) => (
+                  <div key={oIdx} className="flex items-start gap-1">
+                    <span className="font-medium">{oIdx + 1})</span>
+                    <span>
+                      {opt}
+                      {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
+                        <span className="font-bold text-emerald-800 ml-1.5">[★ 정답]</span>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {examPaperType === 'teacher' && (
+                <div className="mt-1.5 p-2 bg-emerald-50 border border-emerald-200 rounded text-xs text-emerald-900">
+                  <span className="font-bold">[정답: {q.correctAnswer}번]</span> {q.explanation}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
 
       {/* NOTE: Certificate issuance content has been removed by user request. */}
 

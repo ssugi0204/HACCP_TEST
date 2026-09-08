@@ -19,16 +19,28 @@
 
 /* Print Styles */
 @media print {
-  .no-print {
-    display: none !important;
-  }
-  .print-content {
-    display: block !important;
+  body {
     background: white !important;
     color: black !important;
-    box-shadow: none !important;
-    padding: 0 !important;
-    margin: 0 !important;
+    font-family: 'Gowun Batang', 'Noto Serif KR', serif !important;
+  }
+  .no-print, header, nav, footer, button, aside {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
     width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  .page-break-avoid {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}
+
+@media screen {
+  .print-only {
+    display: none !important;
   }
 }
