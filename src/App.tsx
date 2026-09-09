@@ -38,7 +38,9 @@ import {
   RotateCcw,
   Users,
   ListFilter,
-  ArrowRight
+  ArrowRight,
+  Loader2,
+  AlertCircle
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { haccpQuestions, Question } from "./data/questions";
@@ -168,6 +170,33 @@ export default function App() {
   const [yearFilter, setYearFilter] = useState<string>("all");
   const [dummyCountInput, setDummyCountInput] = useState<string>("5");
   const [adminViewMode, setAdminViewMode] = useState<'grouped' | 'list'>('grouped'); // 인원별 1차·2차 묶음이 기본값
+
+  // 관리자 커스텀 삭제 확인 모달 상태 (iframe 환경에서 window.confirm 차단 문제 완벽 해결)
+  const [deleteConfirmModal, setDeleteConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    targetName?: string;
+    description: string;
+    warning?: string;
+    confirmText?: string;
+    onConfirm: () => Promise<void> | void;
+    isLoading?: boolean;
+  }>({
+    isOpen: false,
+    title: "",
+    description: "",
+    onConfirm: () => {}
+  });
+
+  // 관리자 전용 인앱 토스트 알림 상태 (iframe 환경에서 window.alert 차단 문제 완벽 해결)
+  const [adminToast, setAdminToast] = useState<{ message: string; type?: 'success' | 'error' | 'info' } | null>(null);
+
+  const showAdminToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setAdminToast({ message, type });
+    setTimeout(() => {
+      setAdminToast(null);
+    }, 4500);
+  };
 
   // 재시험 모드 및 관리자 승인 관련 상태
   const [isReexamMode, setIsReexamMode] = useState(false);
@@ -862,230 +891,245 @@ export default function App() {
       const updatedHistory = [...sortedSamples, ...examHistory];
       setExamHistory(updatedHistory);
       localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
-      alert(`Firestore 권한 오류로 인해 더미 데이터 ${count}건이 로컬 저장소에 저장되었습니다.`);
+      showAdminToast(`더미 데이터 ${count}건이 로컬 저장소에 추가되었습니다.`, "info");
     } else {
-      alert(`성공적으로 더미 데이터 ${count}건이 생성되어 Firestore에 저장 중입니다.`);
+      showAdminToast(`더미 데이터 ${count}건이 성공적으로 생성되었습니다.`, "success");
     }
   };
 
-  // 1) 관리자: 전체 응시 이력 완전 초기화 (Firestore DB + 로컬 스토리지 일괄 완전 삭제)
-  const handleClearHistory = async () => {
+  // 1) 관리자: 전체 응시 이력 완전 초기화 (모달 확인 후 실행)
+  const handleClearHistory = () => {
     if (examHistory.length === 0) {
-      alert("삭제할 응시 이력이 없습니다.");
+      showAdminToast("삭제할 응시 이력이 없습니다.", "info");
       return;
     }
 
-    const confirmMsg = 
-      "⚠️ [전체 응시 이력 완전 초기화]\n\n" +
-      `현재 등록된 모든 응시 기록(${examHistory.length}건)을 완전히 삭제하시겠습니까?\n\n` +
-      "※ 삭제 시 데이터베이스(Firestore) 및 모든 저장소의 시험 기록이 영구 삭제되며, 모든 응시자가 처음부터 다시 시험을 볼 수 있게 완전 리셋됩니다.\n" +
-      "※ 정말로 모든 시험 이력을 초기화하시겠습니까?";
+    setDeleteConfirmModal({
+      isOpen: true,
+      title: "전체 응시 이력 완전 초기화",
+      description: `현재 등록된 모든 응시자 시험 기록(총 ${examHistory.length}건)을 영구 삭제하시겠습니까?\n\n데이터베이스 및 로컬의 모든 평가 결과가 초기화되며, 모든 임직원이 처음부터 다시 평가에 응시할 수 있게 됩니다.`,
+      warning: "삭제된 시험 기록 및 OMR 답안 내역은 절대 복구할 수 없습니다.",
+      confirmText: "전체 기록 영구 삭제",
+      onConfirm: async () => {
+        setIsClearingHistory(true);
+        let deletedCount = 0;
+        let failCount = 0;
 
-    if (!window.confirm(confirmMsg)) {
-      return;
-    }
-
-    setIsClearingHistory(true);
-    let failCount = 0;
-    let deletedCount = 0;
-
-    try {
-      // 1. Firestore 컬렉션의 실제 모든 문서를 직접 조회하여 일괄 삭제 (누락 및 유령 문서 완벽 방지)
-      let firestoreDocIds: string[] = [];
-      try {
-        const querySnapshot = await getDocs(collection(db, "exam_history"));
-        firestoreDocIds = querySnapshot.docs.map(docSnap => docSnap.id);
-      } catch (queryErr) {
-        console.warn("getDocs query failed, using local IDs:", queryErr);
-        firestoreDocIds = examHistory.map(r => r.id).filter((id): id is string => Boolean(id));
-      }
-
-      // 2. 모든 Firestore 문서를 병렬 삭제
-      const deletePromises = firestoreDocIds.map(async (docId) => {
         try {
-          await deleteDoc(doc(db, "exam_history", docId));
-          deletedCount++;
-        } catch (delErr) {
-          console.error(`문서 삭제 오류 (ID: ${docId}):`, delErr);
-          failCount++;
-        }
-      });
-      await Promise.all(deletePromises);
+          // 1. Firestore 컬렉션의 실제 모든 문서를 직접 조회하여 일괄 삭제 (누락 및 유령 문서 완벽 방지)
+          let firestoreDocIds: string[] = [];
+          try {
+            const querySnapshot = await getDocs(collection(db, "exam_history"));
+            firestoreDocIds = querySnapshot.docs.map(docSnap => docSnap.id);
+          } catch (queryErr) {
+            console.warn("getDocs query failed, using local IDs:", queryErr);
+            firestoreDocIds = examHistory.map(r => r.id).filter((id): id is string => Boolean(id));
+          }
 
-      // 3. 로컬 스토리지 및 로컬 상태 일괄 완전 초기화
-      setExamHistory([]);
-      localStorage.removeItem("haccp_exam_history_admin");
-      setMyLocalExamRecord(null);
-      localStorage.removeItem("my_haccp_exam_record");
-      localStorage.removeItem("haccp_examinee_info");
-      localStorage.removeItem("haccp_exam_answers");
-      setAnswers({});
-      setIsSubmitted(false);
+          // 중복 제거 및 local IDs도 합산
+          const allTargetIds = new Set<string>(firestoreDocIds);
+          examHistory.forEach(r => {
+            if (r.id) allTargetIds.add(r.id);
+          });
 
-      if (failCount > 0) {
-        alert(`일부 항목(${failCount}건)을 제외하고 응시 이력(${deletedCount}건)이 초기화되었습니다.`);
-      } else {
-        alert("✅ 모든 응시 이력이 성공적으로 완전 초기화되었습니다!\n이제 모든 인원이 처음부터 다시 깨끗하게 응시할 수 있습니다.");
-      }
-    } catch (e: any) {
-      console.error("전체 이력 초기화 오류: ", e);
-      // Fallback: 로컬 스토리지와 상태라도 즉시 초기화
-      setExamHistory([]);
-      setMyLocalExamRecord(null);
-      localStorage.removeItem("haccp_exam_history_admin");
-      localStorage.removeItem("my_haccp_exam_record");
-      localStorage.removeItem("haccp_examinee_info");
-      localStorage.removeItem("haccp_exam_answers");
-      alert("초기화 완료 (로컬 저장소 즉시 초기화됨): " + (e?.message || e));
-    } finally {
-      setIsClearingHistory(false);
-    }
-  };
+          // 2. 모든 Firestore 문서를 병렬 삭제
+          const deletePromises = Array.from(allTargetIds).map(async (docId) => {
+            try {
+              await deleteDoc(doc(db, "exam_history", docId));
+              deletedCount++;
+            } catch (delErr) {
+              console.error(`문서 삭제 오류 (ID: ${docId}):`, delErr);
+              failCount++;
+            }
+          });
+          await Promise.all(deletePromises);
 
-  // 2) 관리자: 개별 응시자 기록 삭제 (해당 인원만 다시 시험 볼 수 있도록 리셋)
-  const handleDeleteSingleRecord = async (record: ExamHistory) => {
-    const recName = (record.name || "").trim() || "성명 미입력";
-    const recDept = (record.dept || "").trim() || "부서 미지정";
-    const recRound = record.round ? `${record.round}차` : (record.isReexam ? "2차" : "1차");
-    const confirmMsg = `[${recName} (${recDept}, ${recRound}, ${record.score}점)] 응시 기록을 삭제하시겠습니까?\n\n※ 삭제 시 해당 인원은 새 응시자로 리셋되어 처음부터 시험을 다시 치를 수 있습니다.`;
-    if (!window.confirm(confirmMsg)) {
-      return;
-    }
-
-    try {
-      // 1. Firestore에서 문서 삭제
-      if (record.id) {
-        try {
-          await deleteDoc(doc(db, "exam_history", record.id));
-        } catch (e) {
-          console.error(`개별 기록 Firestore 삭제 오류 (ID: ${record.id}):`, e);
-        }
-      }
-
-      // 2. 로컬 상태 및 localStorage 즉각 업데이트
-      const updated = examHistory.filter(r => {
-        if (record.id && r.id) {
-          return r.id !== record.id;
-        }
-        return !(
-          (r.idNo && record.idNo && r.idNo === record.idNo) ||
-          (r.name === record.name && r.dept === record.dept && r.date === record.date && r.round === record.round)
-        );
-      });
-      setExamHistory(updated);
-      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updated));
-
-      // 3. 만약 현재 접속 기기의 시험 기록과 동일한 경우 본인 로컬 기록도 함께 제거
-      if (myLocalExamRecord) {
-        const isSelf = 
-          (record.id && myLocalExamRecord.id === record.id) ||
-          (record.idNo && myLocalExamRecord.idNo === record.idNo) ||
-          (record.name && myLocalExamRecord.name && record.name === myLocalExamRecord.name && record.dept === myLocalExamRecord.dept);
-
-        if (isSelf) {
+          // 3. 로컬 스토리지 및 로컬 상태 일괄 완전 초기화
+          setExamHistory([]);
+          localStorage.removeItem("haccp_exam_history_admin");
           setMyLocalExamRecord(null);
           localStorage.removeItem("my_haccp_exam_record");
           localStorage.removeItem("haccp_examinee_info");
           localStorage.removeItem("haccp_exam_answers");
+          setAnswers({});
+          setIsSubmitted(false);
+
+          if (failCount > 0) {
+            showAdminToast(`전체 이력이 초기화되었습니다. (${deletedCount}건 삭제 완료)`, "success");
+          } else {
+            showAdminToast("모든 응시 이력이 성공적으로 완전 초기화되었습니다.", "success");
+          }
+        } catch (e: any) {
+          console.error("전체 이력 초기화 오류: ", e);
+          setExamHistory([]);
+          setMyLocalExamRecord(null);
+          localStorage.removeItem("haccp_exam_history_admin");
+          localStorage.removeItem("my_haccp_exam_record");
+          localStorage.removeItem("haccp_examinee_info");
+          localStorage.removeItem("haccp_exam_answers");
+          showAdminToast("로컬 저장소가 즉시 완전 초기화되었습니다.", "success");
+        } finally {
+          setIsClearingHistory(false);
         }
       }
-
-      alert(`[${recName}] 님의 응시 기록이 정상적으로 삭제되었습니다.`);
-    } catch (err: any) {
-      console.error("개별 기록 삭제 오류:", err);
-      const updated = examHistory.filter(r => (record.id ? r.id !== record.id : r !== record));
-      setExamHistory(updated);
-      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updated));
-      alert("기록 삭제 완료 (로컬 갱신): " + (err?.message || err));
-    }
+    });
   };
 
-  // 2-1) 관리자: 사원별 1차 및 2차 기록 전체 삭제 (해당 사원 완전 초기화)
-  const handleDeletePersonRecords = async (person: PersonExamSummary) => {
+  // 2) 관리자: 개별 응시자 기록 삭제 (모달 확인 후 실행)
+  const handleDeleteSingleRecord = (record: ExamHistory) => {
+    const recName = (record.name || "").trim() || "성명 미입력";
+    const recDept = (record.dept || "").trim() || "부서 미지정";
+    const recRound = record.round ? `${record.round}차` : (record.isReexam ? "2차" : "1차");
+    const targetLabel = `${recName} (${recDept}, ${recRound} 평가, ${record.score}점)`;
+
+    setDeleteConfirmModal({
+      isOpen: true,
+      title: "개별 평가 기록 삭제",
+      targetName: targetLabel,
+      description: `선택하신 [${targetLabel}] 기록을 데이터베이스에서 삭제하시겠습니까?\n\n삭제 시 해당 회차 기록이 제거되며, 필요 시 재응시할 수 있습니다.`,
+      confirmText: "해당 기록 삭제",
+      onConfirm: async () => {
+        try {
+          // 1. Firestore에서 문서 삭제
+          if (record.id) {
+            try {
+              await deleteDoc(doc(db, "exam_history", record.id));
+            } catch (e) {
+              console.error(`개별 기록 Firestore 삭제 오류 (ID: ${record.id}):`, e);
+            }
+          }
+
+          // 2. 로컬 상태 및 localStorage 즉각 업데이트
+          const updated = examHistory.filter(r => {
+            if (record.id && r.id) {
+              return r.id !== record.id;
+            }
+            return !(
+              (r.idNo && record.idNo && r.idNo === record.idNo) ||
+              (r.name === record.name && r.dept === record.dept && r.date === record.date && r.round === record.round)
+            );
+          });
+          setExamHistory(updated);
+          localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updated));
+
+          // 3. 만약 현재 접속 기기의 시험 기록과 동일한 경우 본인 로컬 기록도 함께 제거
+          if (myLocalExamRecord) {
+            const isSelf = 
+              (record.id && myLocalExamRecord.id === record.id) ||
+              (record.idNo && myLocalExamRecord.idNo === record.idNo) ||
+              (record.name && myLocalExamRecord.name && record.name === myLocalExamRecord.name && record.dept === myLocalExamRecord.dept);
+
+            if (isSelf) {
+              setMyLocalExamRecord(null);
+              localStorage.removeItem("my_haccp_exam_record");
+              localStorage.removeItem("haccp_examinee_info");
+              localStorage.removeItem("haccp_exam_answers");
+            }
+          }
+
+          showAdminToast(`[${recName}] 님의 시험 기록이 삭제되었습니다.`, "success");
+        } catch (err: any) {
+          console.error("개별 기록 삭제 오류:", err);
+          const updated = examHistory.filter(r => (record.id ? r.id !== record.id : r !== record));
+          setExamHistory(updated);
+          localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updated));
+          showAdminToast(`기록이 삭제되었습니다.`, "success");
+        }
+      }
+    });
+  };
+
+  // 2-1) 관리자: 사원별 1차 및 2차 기록 전체 삭제 (모달 확인 후 실행)
+  const handleDeletePersonRecords = (person: PersonExamSummary) => {
     const displayName = person.name && person.name !== "성명 미입력"
       ? `${person.name} (${person.dept || '부서 미지정'})`
       : `${person.idNo || '미등록 사원'} (${person.dept || '부서'})`;
 
-    const confirmMsg = `[${displayName}] 님의 모든 응시 기록(1차 및 2차 시험)을 완전히 삭제하시겠습니까?\n\n※ 삭제 시 해당 사원의 응시 기록이 초기화되어 처음부터 새로 응시할 수 있게 됩니다.`;
-    if (!window.confirm(confirmMsg)) {
-      return;
-    }
+    setDeleteConfirmModal({
+      isOpen: true,
+      title: "사원 전체 시험 이력 삭제",
+      targetName: displayName,
+      description: `[${displayName}] 님의 모든 응시 기록(1차 및 2차 시험, OMR 답안 내역)을 완전히 삭제하시겠습니까?\n\n삭제 시 해당 사원의 응시 상태가 초기화되어 1차부터 새로 시험에 응시할 수 있게 됩니다.`,
+      warning: "해당 사원의 1차 및 2차 시험 결과가 데이터베이스에서 영구히 삭제됩니다.",
+      confirmText: "사원 기록 완전 삭제",
+      onConfirm: async () => {
+        const pName = (person.name || "").trim();
+        const pDept = (person.dept || "").trim();
+        const pIdNo = (person.idNo || "").trim();
+        const firstId = person.firstExam?.id;
+        const secondId = person.secondExam?.id;
 
-    const pName = (person.name || "").trim();
-    const pDept = (person.dept || "").trim();
-    const pIdNo = (person.idNo || "").trim();
-    const firstId = person.firstExam?.id;
-    const secondId = person.secondExam?.id;
+        // 삭제 대상 레코드 수집
+        const recordsToDelete = examHistory.filter(r => {
+          const rName = (r.name || "").trim();
+          const rDept = (r.dept || "").trim();
+          const rIdNo = (r.idNo || "").trim();
 
-    // 삭제 대상 레코드 수집
-    const recordsToDelete = examHistory.filter(r => {
-      const rName = (r.name || "").trim();
-      const rDept = (r.dept || "").trim();
-      const rIdNo = (r.idNo || "").trim();
+          // 1. 고유 ID 일치
+          if (r.id && (r.id === firstId || r.id === secondId)) return true;
+          // 2. 수험번호 일치
+          if (pIdNo && rIdNo && rIdNo === pIdNo) return true;
+          // 3. 성명 및 부서 일치
+          if (pName && rName && pName !== "성명 미입력" && rName === pName && (!pDept || !rDept || rDept === pDept)) return true;
+          // 4. personKey 일치
+          if (person.personKey && `${rName}_${rDept}` === person.personKey) return true;
 
-      // 1. 고유 ID 일치
-      if (r.id && (r.id === firstId || r.id === secondId)) return true;
-      // 2. 수험번호 일치
-      if (pIdNo && rIdNo && rIdNo === pIdNo) return true;
-      // 3. 성명 및 부서 일치
-      if (pName && rName && pName !== "성명 미입력" && rName === pName && (!pDept || !rDept || rDept === pDept)) return true;
-      // 4. personKey 일치
-      if (person.personKey && `${rName}_${rDept}` === person.personKey) return true;
+          return false;
+        });
 
-      return false;
-    });
+        const targetDocIds = new Set<string>();
+        if (firstId) targetDocIds.add(firstId);
+        if (secondId) targetDocIds.add(secondId);
+        recordsToDelete.forEach(r => {
+          if (r.id) targetDocIds.add(r.id);
+        });
 
-    const targetDocIds = new Set<string>();
-    if (firstId) targetDocIds.add(firstId);
-    if (secondId) targetDocIds.add(secondId);
-    recordsToDelete.forEach(r => {
-      if (r.id) targetDocIds.add(r.id);
-    });
-
-    try {
-      // 1. Firestore에서 해당 사원의 모든 문서 병렬 삭제
-      const deletePromises = Array.from(targetDocIds).map(async (docId) => {
         try {
-          await deleteDoc(doc(db, "exam_history", docId));
-        } catch (e) {
-          console.error(`사원 기록 Firestore 삭제 오류 (ID: ${docId}):`, e);
-        }
-      });
-      await Promise.all(deletePromises);
+          // 1. Firestore에서 해당 사원의 모든 문서 병렬 삭제
+          const deletePromises = Array.from(targetDocIds).map(async (docId) => {
+            try {
+              await deleteDoc(doc(db, "exam_history", docId));
+            } catch (e) {
+              console.error(`사원 기록 Firestore 삭제 오류 (ID: ${docId}):`, e);
+            }
+          });
+          await Promise.all(deletePromises);
 
-      // 2. 로컬 상태 및 localStorage 즉시 동기화
-      const updatedHistory = examHistory.filter(r => 
-        !recordsToDelete.includes(r) && (!r.id || !targetDocIds.has(r.id))
-      );
-      setExamHistory(updatedHistory);
-      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
+          // 2. 로컬 상태 및 localStorage 즉시 동기화
+          const updatedHistory = examHistory.filter(r => 
+            !recordsToDelete.includes(r) && (!r.id || !targetDocIds.has(r.id))
+          );
+          setExamHistory(updatedHistory);
+          localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
 
-      // 3. 본인 기기의 기록인 경우 로컬 기록도 완전 초기화
-      if (myLocalExamRecord) {
-        const myName = (myLocalExamRecord.name || "").trim();
-        const myDept = (myLocalExamRecord.dept || "").trim();
-        const myIdNo = (myLocalExamRecord.idNo || "").trim();
-        const isMyRecord = 
-          (myLocalExamRecord.id && targetDocIds.has(myLocalExamRecord.id)) ||
-          (pIdNo && myIdNo && myIdNo === pIdNo) ||
-          (pName && myName && pName !== "성명 미입력" && myName === pName && (!pDept || !myDept || myDept === pDept));
+          // 3. 본인 기기의 기록인 경우 로컬 기록도 완전 초기화
+          if (myLocalExamRecord) {
+            const myName = (myLocalExamRecord.name || "").trim();
+            const myDept = (myLocalExamRecord.dept || "").trim();
+            const myIdNo = (myLocalExamRecord.idNo || "").trim();
+            const isMyRecord = 
+              (myLocalExamRecord.id && targetDocIds.has(myLocalExamRecord.id)) ||
+              (pIdNo && myIdNo && myIdNo === pIdNo) ||
+              (pName && myName && pName !== "성명 미입력" && myName === pName && (!pDept || !myDept || myDept === pDept));
 
-        if (isMyRecord) {
-          setMyLocalExamRecord(null);
-          localStorage.removeItem("my_haccp_exam_record");
-          localStorage.removeItem("haccp_examinee_info");
-          localStorage.removeItem("haccp_exam_answers");
+            if (isMyRecord) {
+              setMyLocalExamRecord(null);
+              localStorage.removeItem("my_haccp_exam_record");
+              localStorage.removeItem("haccp_examinee_info");
+              localStorage.removeItem("haccp_exam_answers");
+            }
+          }
+
+          showAdminToast(`[${person.name || '해당 사원'}] 님의 모든 시험 기록이 삭제되었습니다.`, "success");
+        } catch (err: any) {
+          console.error("인원별 기록 삭제 오류:", err);
+          const updatedHistory = examHistory.filter(r => !recordsToDelete.includes(r));
+          setExamHistory(updatedHistory);
+          localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
+          showAdminToast(`삭제가 완료되었습니다.`, "success");
         }
       }
-
-      alert(`[${person.name || '해당 사원'}] 님의 모든 시험 기록이 성공적으로 삭제되었습니다.`);
-    } catch (err: any) {
-      console.error("인원별 기록 삭제 오류:", err);
-      const updatedHistory = examHistory.filter(r => !recordsToDelete.includes(r));
-      setExamHistory(updatedHistory);
-      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
-      alert("삭제 완료 (로컬 목록 갱신됨): " + (err?.message || err));
-    }
+    });
   };
 
   const downloadExcelReport = () => {
@@ -1688,7 +1732,7 @@ service cloud.firestore {
                           onClick={() => {
                             const count = parseInt(dummyCountInput, 10);
                             if (isNaN(count) || count <= 0) {
-                              alert("올바른 개수를 입력하세요.");
+                              showAdminToast("올바른 개수를 입력하세요.", "error");
                               return;
                             }
                             handleAddSampleDataOfCount(count);
@@ -1699,17 +1743,15 @@ service cloud.firestore {
                         </button>
                       </div>
 
-                      {examHistory.length > 0 && (
-                        <button
-                          onClick={handleClearHistory}
-                          disabled={isClearingHistory}
-                          className="px-3.5 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-50"
-                          title="모든 응시자 시험 이력 영구 삭제 및 완전 초기화"
-                        >
-                          <Trash2 size={14} />
-                          {isClearingHistory ? "초기화 중..." : "전체 이력 초기화"}
-                        </button>
-                      )}
+                      <button
+                        onClick={handleClearHistory}
+                        disabled={isClearingHistory}
+                        className="px-3.5 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-50"
+                        title="모든 응시자 시험 이력 영구 삭제 및 완전 초기화"
+                      >
+                        <Trash2 size={14} />
+                        {isClearingHistory ? "초기화 진행 중..." : "전체 이력 초기화"}
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -2440,7 +2482,7 @@ service cloud.firestore {
                               <div className="bg-amber-50/80 border border-amber-200/80 rounded-xl p-3 flex items-center gap-2.5 text-xs text-amber-900">
                                 <Clock size={16} className="text-amber-700 shrink-0" />
                                 <div className="leading-tight">
-                                  <span className="font-bold">재시험 시간(30분) 통제:</span> 재시험 또한 동일하게 30분의 제한 시간이 주어지며, 30분이 지나면 시험이 자동 종료됩니다.
+                                  <span className="font-bold">재시험 시간(30분):</span> 재시험 또한 동일하게 30분의 제한 시간이 주어지며, 30분이 지나면 시험이 자동 종료됩니다.
                                 </div>
                               </div>
                               <button
@@ -2653,7 +2695,7 @@ service cloud.firestore {
                     <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3 flex items-center gap-2.5 text-xs text-amber-900">
                       <Clock size={16} className="text-amber-700 shrink-0" />
                       <div className="leading-tight">
-                        <span className="font-bold">시험 시간(30분) 통제:</span> 시험 시작 후 30분의 제한 시간이 적용되며, 30분이 지나면 시험이 자동으로 종료되고 안내 창이 나타납니다.
+                        <span className="font-bold">시험 시간(30분):</span> 시험 시작 후 30분의 제한 시간이 적용되며, 30분이 지나면 시험이 자동으로 종료되고 안내 창이 나타납니다.
                       </div>
                     </div>
 
@@ -4036,6 +4078,108 @@ service cloud.firestore {
               </div>
             </motion.div>
           </div>
+        )}
+      </AnimatePresence>
+
+      {/* 5. 관리자 커스텀 삭제 확인 모달 (iframe sandbox 및 브라우저 완벽 호환) */}
+      <AnimatePresence>
+        {deleteConfirmModal.isOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-stone-250 overflow-hidden"
+            >
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-red-100 text-red-600 flex items-center justify-center shrink-0">
+                  <Trash2 size={24} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-lg font-bold text-stone-900 leading-tight">
+                    {deleteConfirmModal.title}
+                  </h3>
+                  {deleteConfirmModal.targetName && (
+                    <p className="text-xs font-bold text-red-600 bg-red-50 inline-block px-2.5 py-1 rounded-lg mt-1.5 border border-red-200">
+                      {deleteConfirmModal.targetName}
+                    </p>
+                  )}
+                  <p className="text-xs text-stone-600 mt-2.5 leading-relaxed whitespace-pre-line">
+                    {deleteConfirmModal.description}
+                  </p>
+                  {deleteConfirmModal.warning && (
+                    <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 flex items-start gap-2 leading-relaxed">
+                      <AlertTriangle size={15} className="shrink-0 text-amber-600 mt-0.5" />
+                      <span>{deleteConfirmModal.warning}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-6 flex items-center justify-end gap-2.5 pt-4 border-t border-stone-100">
+                <button
+                  type="button"
+                  disabled={deleteConfirmModal.isLoading}
+                  onClick={() => setDeleteConfirmModal(prev => ({ ...prev, isOpen: false }))}
+                  className="px-4 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-700 font-bold text-xs rounded-xl transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  취소
+                </button>
+                <button
+                  type="button"
+                  disabled={deleteConfirmModal.isLoading}
+                  onClick={async () => {
+                    setDeleteConfirmModal(prev => ({ ...prev, isLoading: true }));
+                    try {
+                      await deleteConfirmModal.onConfirm();
+                    } finally {
+                      setDeleteConfirmModal(prev => ({ ...prev, isOpen: false, isLoading: false }));
+                    }
+                  }}
+                  className="px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white font-bold text-xs rounded-xl transition-colors cursor-pointer shadow-xs flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {deleteConfirmModal.isLoading ? (
+                    <>
+                      <Loader2 size={14} className="animate-spin" />
+                      삭제 처리 중...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 size={14} />
+                      {deleteConfirmModal.confirmText || "확인 및 삭제"}
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* 6. 관리자 인앱 알림 토스트 (iframe sandbox 호환) */}
+      <AnimatePresence>
+        {adminToast && (
+          <motion.div
+            initial={{ opacity: 0, y: -20, x: "-50%" }}
+            animate={{ opacity: 1, y: 0, x: "-50%" }}
+            exit={{ opacity: 0, y: -20, x: "-50%" }}
+            className={`fixed top-6 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl shadow-2xl border flex items-center gap-2.5 text-xs font-bold transition-all ${
+              adminToast.type === 'error'
+                ? 'bg-red-900 text-white border-red-700'
+                : adminToast.type === 'info'
+                  ? 'bg-stone-800 text-white border-stone-600'
+                  : 'bg-emerald-900 text-white border-emerald-700'
+            }`}
+          >
+            {adminToast.type === 'error' ? (
+              <AlertTriangle size={16} className="text-red-400" />
+            ) : adminToast.type === 'info' ? (
+              <AlertCircle size={16} className="text-stone-300" />
+            ) : (
+              <CheckCircle2 size={16} className="text-emerald-400" />
+            )}
+            <span>{adminToast.message}</span>
+          </motion.div>
         )}
       </AnimatePresence>
 
