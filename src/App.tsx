@@ -42,7 +42,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { haccpQuestions, Question } from "./data/questions";
-import { collection, addDoc, onSnapshot, query, orderBy, Timestamp, deleteDoc, doc, updateDoc } from "firebase/firestore";
+import { collection, addDoc, onSnapshot, query, orderBy, Timestamp, deleteDoc, doc, updateDoc, getDocs } from "firebase/firestore";
 import { db } from "./lib/firebase";
 
 // Custom Kooksoondang Logo SVG/HTML Component (High-fidelity corporate brand design)
@@ -340,21 +340,31 @@ export default function App() {
       }
     }
 
-    const q = query(collection(db, "exam_history"), orderBy("createdAt", "desc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    // Firestore 실시간 리스너: createdAt 누락 문서도 100% 감지 및 삭제할 수 있도록 collection 직접 구독
+    const unsubscribe = onSnapshot(collection(db, "exam_history"), (snapshot) => {
       const historyData: ExamHistory[] = [];
-      snapshot.forEach((doc) => {
-        const data = doc.data();
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
         const docDate = data.date || "";
         const fallbackYear = docDate ? parseInt(docDate.split('-')[0], 10) : new Date().getFullYear();
         const recordYear = data.year || (isNaN(fallbackYear) ? new Date().getFullYear() : fallbackYear);
         
         historyData.push({ 
-          id: doc.id, 
+          id: docSnap.id, 
           ...data,
+          name: (data.name || "").trim(),
+          dept: (data.dept || "").trim(),
           year: recordYear
         } as ExamHistory);
       });
+
+      // 최신 등록 순으로 정렬 (createdAt 또는 date 기준)
+      historyData.sort((a, b) => {
+        const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.date ? new Date(a.date).getTime() : 0);
+        const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.date ? new Date(b.date).getTime() : 0);
+        return timeB - timeA;
+      });
+
       setExamHistory(historyData);
       setFirebaseError(null);
       setIsHistoryLoaded(true);
@@ -421,12 +431,43 @@ export default function App() {
   const finalScore = correctCount * 5; // 20 questions, 5 points each
   const isPassed = finalScore >= passingScoreThreshold;
 
-  // 사람(이름+부서)별 1차, 2차 시험 결과 그룹화 헬퍼 함수
+  // 사람(이름+부서 또는 idNo)별 1차, 2차 시험 결과 그룹화 헬퍼 함수
   const groupExamsByPerson = (records: ExamHistory[]): PersonExamSummary[] => {
+    // 1. idNo -> name / dept 매핑 테이블 생성 (재시험 등에서 이름 누락 시 복원)
+    const idToInfo = new Map<string, { name: string; dept: string }>();
+    records.forEach(r => {
+      const name = (r.name || "").trim();
+      const dept = (r.dept || "").trim();
+      const idNo = (r.idNo || "").trim();
+      if (idNo && name) {
+        idToInfo.set(idNo, { name, dept });
+      }
+    });
+
     const map = new Map<string, ExamHistory[]>();
 
     records.forEach(r => {
-      const key = `${r.name.trim()}_${r.dept.trim()}`;
+      let rName = (r.name || "").trim();
+      let rDept = (r.dept || "").trim();
+      const rIdNo = (r.idNo || "").trim();
+
+      // 이름이 누락된 레코드의 경우 동일 수험번호(idNo)를 통해 이름 및 부서 자동 복원
+      if (!rName && rIdNo && idToInfo.has(rIdNo)) {
+        const info = idToInfo.get(rIdNo)!;
+        rName = info.name;
+        if (!rDept) rDept = info.dept;
+      }
+
+      // 고유 그룹 키 결정 (TypeError 방지 및 안전한 분리)
+      let key = "";
+      if (rName) {
+        key = `${rName}_${rDept || '기타'}`;
+      } else if (rIdNo) {
+        key = `idno_${rIdNo}`;
+      } else {
+        key = `doc_${r.id || Math.random()}`;
+      }
+
       if (!map.has(key)) {
         map.set(key, []);
       }
@@ -459,9 +500,9 @@ export default function App() {
       }
 
       const rep = sorted[sorted.length - 1];
-      const name = rep.name;
-      const dept = rep.dept;
-      const idNo = firstExam?.idNo || rep.idNo;
+      const name = (rep.name || "").trim() || (firstExam?.name || "").trim() || (secondExam?.name || "").trim() || "성명 미입력";
+      const dept = (rep.dept || "").trim() || (firstExam?.dept || "").trim() || (secondExam?.dept || "").trim() || "부서 미지정";
+      const idNo = firstExam?.idNo || rep.idNo || secondExam?.idNo || "";
       const year = rep.year || (rep.date ? parseInt(rep.date.split('-')[0], 10) : new Date().getFullYear());
 
       const firstScore = firstExam ? firstExam.score : 0;
@@ -514,14 +555,21 @@ export default function App() {
     setCurrentCardIndex(0);
 
     // 1차 기록에서 성명과 소속 부서를 그대로 승계하여 바인딩
-    const base = targetRecord || myLocalExamRecord || examHistory.find(r => 
-      r.name.trim() === examinee.name.trim() && r.dept.trim() === examinee.dept.trim()
-    );
+    let base = targetRecord || myLocalExamRecord;
+    if (!base && examinee.name.trim()) {
+      base = examHistory.find(r => 
+        (r.name || "").trim() === examinee.name.trim() && 
+        (!examinee.dept || (r.dept || "").trim() === examinee.dept.trim())
+      );
+    }
+    if (!base && examinee.idNo) {
+      base = examHistory.find(r => (r.idNo || "").trim() === examinee.idNo.trim() && Boolean((r.name || "").trim()));
+    }
 
-    if (base) {
+    if (base && (base.name || "").trim()) {
       const fixedExaminee: ExamineeInfo = {
-        name: base.name.trim(),
-        dept: base.dept.trim(),
+        name: (base.name || "").trim(),
+        dept: (base.dept || "").trim() || "품질보증팀",
         idNo: base.idNo || examinee.idNo,
         date: getTodayDateString()
       };
@@ -820,7 +868,7 @@ export default function App() {
     }
   };
 
-  // 1) 관리자: 전체 응시 이력 완전 초기화 (Firestore + 로컬 스토리지 일괄 리셋)
+  // 1) 관리자: 전체 응시 이력 완전 초기화 (Firestore DB + 로컬 스토리지 일괄 완전 삭제)
   const handleClearHistory = async () => {
     if (examHistory.length === 0) {
       alert("삭제할 응시 이력이 없습니다.");
@@ -829,9 +877,9 @@ export default function App() {
 
     const confirmMsg = 
       "⚠️ [전체 응시 이력 완전 초기화]\n\n" +
-      `현재 등록된 총 ${examHistory.length}명의 모든 응시 기록을 정말로 완전히 삭제하시겠습니까?\n\n` +
-      "※ 삭제 시 데이터베이스(Firestore) 및 모든 기기의 시험 기록이 영구 삭제되며, 모든 응시자가 처음부터 다시 시험을 볼 수 있게 리셋됩니다.\n" +
-      "※ 테스트 진행 후 정식 오픈 전 모든 시험 데이터를 비울 때 사용하십시오.";
+      `현재 등록된 모든 응시 기록(${examHistory.length}건)을 완전히 삭제하시겠습니까?\n\n` +
+      "※ 삭제 시 데이터베이스(Firestore) 및 모든 저장소의 시험 기록이 영구 삭제되며, 모든 응시자가 처음부터 다시 시험을 볼 수 있게 완전 리셋됩니다.\n" +
+      "※ 정말로 모든 시험 이력을 초기화하시겠습니까?";
 
     if (!window.confirm(confirmMsg)) {
       return;
@@ -839,40 +887,56 @@ export default function App() {
 
     setIsClearingHistory(true);
     let failCount = 0;
+    let deletedCount = 0;
 
     try {
-      const deletePromises = examHistory.map(async (record) => {
-        if (record.id) {
-          try {
-            await deleteDoc(doc(db, "exam_history", record.id));
-          } catch (e) {
-            console.error("문서 삭제 오류 (ID: " + record.id + "):", e);
-            failCount++;
-          }
+      // 1. Firestore 컬렉션의 실제 모든 문서를 직접 조회하여 일괄 삭제 (누락 및 유령 문서 완벽 방지)
+      let firestoreDocIds: string[] = [];
+      try {
+        const querySnapshot = await getDocs(collection(db, "exam_history"));
+        firestoreDocIds = querySnapshot.docs.map(docSnap => docSnap.id);
+      } catch (queryErr) {
+        console.warn("getDocs query failed, using local IDs:", queryErr);
+        firestoreDocIds = examHistory.map(r => r.id).filter((id): id is string => Boolean(id));
+      }
+
+      // 2. 모든 Firestore 문서를 병렬 삭제
+      const deletePromises = firestoreDocIds.map(async (docId) => {
+        try {
+          await deleteDoc(doc(db, "exam_history", docId));
+          deletedCount++;
+        } catch (delErr) {
+          console.error(`문서 삭제 오류 (ID: ${docId}):`, delErr);
+          failCount++;
         }
       });
       await Promise.all(deletePromises);
 
-      // 로컬 스토리지 및 로컬 상태 일괄 초기화
+      // 3. 로컬 스토리지 및 로컬 상태 일괄 완전 초기화
       setExamHistory([]);
       localStorage.removeItem("haccp_exam_history_admin");
       setMyLocalExamRecord(null);
       localStorage.removeItem("my_haccp_exam_record");
       localStorage.removeItem("haccp_examinee_info");
+      localStorage.removeItem("haccp_exam_answers");
+      setAnswers({});
+      setIsSubmitted(false);
 
       if (failCount > 0) {
-        alert(`일부 항목(${failCount}건)을 제외하고 전체 응시 이력이 초기화되었습니다.`);
+        alert(`일부 항목(${failCount}건)을 제외하고 응시 이력(${deletedCount}건)이 초기화되었습니다.`);
       } else {
         alert("✅ 모든 응시 이력이 성공적으로 완전 초기화되었습니다!\n이제 모든 인원이 처음부터 다시 깨끗하게 응시할 수 있습니다.");
       }
     } catch (e: any) {
       console.error("전체 이력 초기화 오류: ", e);
-      alert("초기화 중 오류가 발생했습니다: " + e.message);
-      // Fallback: 로컬이라도 비움
-      localStorage.removeItem("haccp_exam_history_admin");
+      // Fallback: 로컬 스토리지와 상태라도 즉시 초기화
       setExamHistory([]);
       setMyLocalExamRecord(null);
+      localStorage.removeItem("haccp_exam_history_admin");
       localStorage.removeItem("my_haccp_exam_record");
+      localStorage.removeItem("haccp_examinee_info");
+      localStorage.removeItem("haccp_exam_answers");
+      alert("초기화 완료 (로컬 저장소 즉시 초기화됨): " + (e?.message || e));
     } finally {
       setIsClearingHistory(false);
     }
@@ -880,78 +944,147 @@ export default function App() {
 
   // 2) 관리자: 개별 응시자 기록 삭제 (해당 인원만 다시 시험 볼 수 있도록 리셋)
   const handleDeleteSingleRecord = async (record: ExamHistory) => {
-    const confirmMsg = `[${record.name} (${record.dept}, ${record.score}점)] 님의 응시 기록을 삭제하시겠습니까?\n\n※ 삭제 시 해당 인원은 새 응시자로 리셋되어 처음부터 시험을 다시 치를 수 있습니다.`;
+    const recName = (record.name || "").trim() || "성명 미입력";
+    const recDept = (record.dept || "").trim() || "부서 미지정";
+    const recRound = record.round ? `${record.round}차` : (record.isReexam ? "2차" : "1차");
+    const confirmMsg = `[${recName} (${recDept}, ${recRound}, ${record.score}점)] 응시 기록을 삭제하시겠습니까?\n\n※ 삭제 시 해당 인원은 새 응시자로 리셋되어 처음부터 시험을 다시 치를 수 있습니다.`;
     if (!window.confirm(confirmMsg)) {
       return;
     }
 
     try {
+      // 1. Firestore에서 문서 삭제
       if (record.id) {
-        await deleteDoc(doc(db, "exam_history", record.id));
+        try {
+          await deleteDoc(doc(db, "exam_history", record.id));
+        } catch (e) {
+          console.error(`개별 기록 Firestore 삭제 오류 (ID: ${record.id}):`, e);
+        }
       }
-      const updated = examHistory.filter(r => (record.id ? r.id !== record.id : r !== record));
+
+      // 2. 로컬 상태 및 localStorage 즉각 업데이트
+      const updated = examHistory.filter(r => {
+        if (record.id && r.id) {
+          return r.id !== record.id;
+        }
+        return !(
+          (r.idNo && record.idNo && r.idNo === record.idNo) ||
+          (r.name === record.name && r.dept === record.dept && r.date === record.date && r.round === record.round)
+        );
+      });
       setExamHistory(updated);
       localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updated));
 
-      // 만약 현재 접속 기기의 시험 기록과 동일한 경우 본인 로컬 기록도 함께 제거
-      if (myLocalExamRecord && (
-        (record.id && myLocalExamRecord.id === record.id) ||
-        (record.idNo && myLocalExamRecord.idNo === record.idNo) ||
-        (record.name === myLocalExamRecord.name && record.dept === myLocalExamRecord.dept)
-      )) {
-        setMyLocalExamRecord(null);
-        localStorage.removeItem("my_haccp_exam_record");
-        localStorage.removeItem("haccp_examinee_info");
+      // 3. 만약 현재 접속 기기의 시험 기록과 동일한 경우 본인 로컬 기록도 함께 제거
+      if (myLocalExamRecord) {
+        const isSelf = 
+          (record.id && myLocalExamRecord.id === record.id) ||
+          (record.idNo && myLocalExamRecord.idNo === record.idNo) ||
+          (record.name && myLocalExamRecord.name && record.name === myLocalExamRecord.name && record.dept === myLocalExamRecord.dept);
+
+        if (isSelf) {
+          setMyLocalExamRecord(null);
+          localStorage.removeItem("my_haccp_exam_record");
+          localStorage.removeItem("haccp_examinee_info");
+          localStorage.removeItem("haccp_exam_answers");
+        }
       }
 
-      alert(`[${record.name}] 님의 응시 기록이 정상적으로 삭제되었습니다. 이제 다시 응시할 수 있습니다.`);
+      alert(`[${recName}] 님의 응시 기록이 정상적으로 삭제되었습니다.`);
     } catch (err: any) {
       console.error("개별 기록 삭제 오류:", err);
-      alert("기록 삭제 실패: " + err.message);
+      const updated = examHistory.filter(r => (record.id ? r.id !== record.id : r !== record));
+      setExamHistory(updated);
+      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updated));
+      alert("기록 삭제 완료 (로컬 갱신): " + (err?.message || err));
     }
   };
 
   // 2-1) 관리자: 사원별 1차 및 2차 기록 전체 삭제 (해당 사원 완전 초기화)
   const handleDeletePersonRecords = async (person: PersonExamSummary) => {
-    const confirmMsg = `[${person.name} (${person.dept})] 님의 모든 응시 기록(1차 및 2차 시험)을 일괄 삭제하시겠습니까?\n\n※ 삭제 시 해당 사원의 응시 기록이 완전히 초기화되어 신규 응시가 가능해집니다.`;
+    const displayName = person.name && person.name !== "성명 미입력"
+      ? `${person.name} (${person.dept || '부서 미지정'})`
+      : `${person.idNo || '미등록 사원'} (${person.dept || '부서'})`;
+
+    const confirmMsg = `[${displayName}] 님의 모든 응시 기록(1차 및 2차 시험)을 완전히 삭제하시겠습니까?\n\n※ 삭제 시 해당 사원의 응시 기록이 초기화되어 처음부터 새로 응시할 수 있게 됩니다.`;
     if (!window.confirm(confirmMsg)) {
       return;
     }
 
-    const recordsToDelete = examHistory.filter(r => 
-      r.name.trim() === person.name.trim() && r.dept.trim() === person.dept.trim()
-    );
+    const pName = (person.name || "").trim();
+    const pDept = (person.dept || "").trim();
+    const pIdNo = (person.idNo || "").trim();
+    const firstId = person.firstExam?.id;
+    const secondId = person.secondExam?.id;
+
+    // 삭제 대상 레코드 수집
+    const recordsToDelete = examHistory.filter(r => {
+      const rName = (r.name || "").trim();
+      const rDept = (r.dept || "").trim();
+      const rIdNo = (r.idNo || "").trim();
+
+      // 1. 고유 ID 일치
+      if (r.id && (r.id === firstId || r.id === secondId)) return true;
+      // 2. 수험번호 일치
+      if (pIdNo && rIdNo && rIdNo === pIdNo) return true;
+      // 3. 성명 및 부서 일치
+      if (pName && rName && pName !== "성명 미입력" && rName === pName && (!pDept || !rDept || rDept === pDept)) return true;
+      // 4. personKey 일치
+      if (person.personKey && `${rName}_${rDept}` === person.personKey) return true;
+
+      return false;
+    });
+
+    const targetDocIds = new Set<string>();
+    if (firstId) targetDocIds.add(firstId);
+    if (secondId) targetDocIds.add(secondId);
+    recordsToDelete.forEach(r => {
+      if (r.id) targetDocIds.add(r.id);
+    });
 
     try {
-      for (const rec of recordsToDelete) {
-        if (rec.id) {
-          try {
-            await deleteDoc(doc(db, "exam_history", rec.id));
-          } catch (e) {
-            console.error("기록 삭제 오류:", e);
-          }
+      // 1. Firestore에서 해당 사원의 모든 문서 병렬 삭제
+      const deletePromises = Array.from(targetDocIds).map(async (docId) => {
+        try {
+          await deleteDoc(doc(db, "exam_history", docId));
+        } catch (e) {
+          console.error(`사원 기록 Firestore 삭제 오류 (ID: ${docId}):`, e);
         }
-      }
+      });
+      await Promise.all(deletePromises);
 
+      // 2. 로컬 상태 및 localStorage 즉시 동기화
       const updatedHistory = examHistory.filter(r => 
-        !(r.name.trim() === person.name.trim() && r.dept.trim() === person.dept.trim())
+        !recordsToDelete.includes(r) && (!r.id || !targetDocIds.has(r.id))
       );
       setExamHistory(updatedHistory);
       localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
 
-      if (myLocalExamRecord && (
-        myLocalExamRecord.name.trim() === person.name.trim() && 
-        myLocalExamRecord.dept.trim() === person.dept.trim()
-      )) {
-        setMyLocalExamRecord(null);
-        localStorage.removeItem("my_haccp_exam_record");
-        localStorage.removeItem("haccp_examinee_info");
+      // 3. 본인 기기의 기록인 경우 로컬 기록도 완전 초기화
+      if (myLocalExamRecord) {
+        const myName = (myLocalExamRecord.name || "").trim();
+        const myDept = (myLocalExamRecord.dept || "").trim();
+        const myIdNo = (myLocalExamRecord.idNo || "").trim();
+        const isMyRecord = 
+          (myLocalExamRecord.id && targetDocIds.has(myLocalExamRecord.id)) ||
+          (pIdNo && myIdNo && myIdNo === pIdNo) ||
+          (pName && myName && pName !== "성명 미입력" && myName === pName && (!pDept || !myDept || myDept === pDept));
+
+        if (isMyRecord) {
+          setMyLocalExamRecord(null);
+          localStorage.removeItem("my_haccp_exam_record");
+          localStorage.removeItem("haccp_examinee_info");
+          localStorage.removeItem("haccp_exam_answers");
+        }
       }
 
-      alert(`[${person.name}] 님의 모든 시험 기록이 정상적으로 삭제되었습니다.`);
+      alert(`[${person.name || '해당 사원'}] 님의 모든 시험 기록이 성공적으로 삭제되었습니다.`);
     } catch (err: any) {
       console.error("인원별 기록 삭제 오류:", err);
-      alert("기록 삭제 실패: " + err.message);
+      const updatedHistory = examHistory.filter(r => !recordsToDelete.includes(r));
+      setExamHistory(updatedHistory);
+      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
+      alert("삭제 완료 (로컬 목록 갱신됨): " + (err?.message || err));
     }
   };
 
@@ -1589,9 +1722,12 @@ service cloud.firestore {
 
               // 1) 인원별 필터링
               const filteredPersons = allPersonSummaries.filter(person => {
-                const matchesSearch = 
-                  person.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                  person.dept.toLowerCase().includes(searchQuery.toLowerCase());
+                const pName = (person.name || "").toLowerCase();
+                const pDept = (person.dept || "").toLowerCase();
+                const pIdNo = (person.idNo || "").toLowerCase();
+                const sQuery = searchQuery.toLowerCase().trim();
+
+                const matchesSearch = !sQuery || pName.includes(sQuery) || pDept.includes(sQuery) || pIdNo.includes(sQuery);
                   
                 const matchesYear = 
                   yearFilter === 'all' ? true : person.year === parseInt(yearFilter, 10);
@@ -1610,10 +1746,12 @@ service cloud.firestore {
               // 2) 시간순 개별 기록 필터링
               const filtered = examHistory.filter(record => {
                 const recordYear = record.year || (record.date ? parseInt(record.date.split('-')[0], 10) : new Date().getFullYear());
+                const rName = (record.name || "").toLowerCase();
+                const rDept = (record.dept || "").toLowerCase();
+                const rIdNo = (record.idNo || "").toLowerCase();
+                const sQuery = searchQuery.toLowerCase().trim();
 
-                const matchesSearch = 
-                  record.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                  record.dept.toLowerCase().includes(searchQuery.toLowerCase());
+                const matchesSearch = !sQuery || rName.includes(sQuery) || rDept.includes(sQuery) || rIdNo.includes(sQuery);
                   
                 const matchesStatus = 
                   statusFilter === 'all' ? true :
@@ -1772,17 +1910,28 @@ service cloud.firestore {
                                         <FileText size={14} className="text-emerald-800" />
                                         <span>1차 정기 위생교육 평가</span>
                                       </div>
-                                      {has1st && (
-                                        <span className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${
-                                          firstPassed 
-                                            ? 'bg-emerald-100 text-emerald-800' 
-                                            : firstScore >= 50 
-                                              ? 'bg-amber-100 text-amber-800' 
-                                              : 'bg-red-100 text-red-800'
-                                        }`}>
-                                          {firstPassed ? '합격' : firstScore >= 50 ? '재평가 대상' : '재교육+재평가'}
-                                        </span>
-                                      )}
+                                      <div className="flex items-center gap-1.5">
+                                        {has1st && (
+                                          <span className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${
+                                            firstPassed 
+                                              ? 'bg-emerald-100 text-emerald-800' 
+                                              : firstScore >= 50 
+                                                ? 'bg-amber-100 text-amber-800' 
+                                                : 'bg-red-100 text-red-800'
+                                          }`}>
+                                            {firstPassed ? '합격' : firstScore >= 50 ? '재평가 대상' : '재교육+재평가'}
+                                          </span>
+                                        )}
+                                        {has1st && (
+                                          <button
+                                            onClick={() => handleDeleteSingleRecord(person.firstExam!)}
+                                            className="p-1 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors cursor-pointer"
+                                            title="1차 평가 기록만 삭제"
+                                          >
+                                            <Trash2 size={13} />
+                                          </button>
+                                        )}
+                                      </div>
                                     </div>
 
                                     {has1st ? (
@@ -1837,27 +1986,38 @@ service cloud.firestore {
                                         <RotateCcw size={14} className="text-indigo-600" />
                                         <span>2차 HACCP 재시험</span>
                                       </div>
-                                      {has2nd ? (
-                                        <span className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${
-                                          person.secondExam!.score >= passingScoreThreshold
-                                            ? 'bg-indigo-100 text-indigo-800'
-                                            : 'bg-red-100 text-red-800'
-                                        }`}>
-                                          {person.secondExam!.score >= passingScoreThreshold ? '재시험 합격' : '재불합격'}
-                                        </span>
-                                      ) : firstPassed ? (
-                                        <span className="text-[11px] font-medium text-stone-400">
-                                          재시험 비해당
-                                        </span>
-                                      ) : (
-                                        <span className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${
-                                          person.isReexamApproved 
-                                            ? 'bg-blue-100 text-blue-800' 
-                                            : 'bg-amber-100 text-amber-800'
-                                        }`}>
-                                          {person.isReexamApproved ? '승인 완료 (응시대기)' : '품질보증팀 미승인'}
-                                        </span>
-                                      )}
+                                      <div className="flex items-center gap-1.5">
+                                        {has2nd ? (
+                                          <span className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${
+                                            person.secondExam!.score >= passingScoreThreshold
+                                              ? 'bg-indigo-100 text-indigo-800'
+                                              : 'bg-red-100 text-red-800'
+                                          }`}>
+                                            {person.secondExam!.score >= passingScoreThreshold ? '재시험 합격' : '재불합격'}
+                                          </span>
+                                        ) : firstPassed ? (
+                                          <span className="text-[11px] font-medium text-stone-400">
+                                            재시험 비해당
+                                          </span>
+                                        ) : (
+                                          <span className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${
+                                            person.isReexamApproved 
+                                              ? 'bg-blue-100 text-blue-800' 
+                                              : 'bg-amber-100 text-amber-800'
+                                          }`}>
+                                            {person.isReexamApproved ? '승인 완료 (응시대기)' : '품질보증팀 미승인'}
+                                          </span>
+                                        )}
+                                        {has2nd && (
+                                          <button
+                                            onClick={() => handleDeleteSingleRecord(person.secondExam!)}
+                                            className="p-1 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors cursor-pointer"
+                                            title="2차 재시험 기록만 삭제 (1차 대기 상태로 복원)"
+                                          >
+                                            <Trash2 size={13} />
+                                          </button>
+                                        )}
+                                      </div>
                                     </div>
 
                                     {has2nd ? (
