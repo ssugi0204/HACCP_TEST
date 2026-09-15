@@ -40,9 +40,15 @@ import {
   ListFilter,
   ArrowRight,
   Loader2,
-  AlertCircle
+  AlertCircle,
+  Maximize2,
+  Minimize2,
+  ZoomIn,
+  ZoomOut
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import jsPDF from "jspdf";
+import html2canvas from "html2canvas";
 import { haccpQuestions, Question } from "./data/questions";
 import { collection, addDoc, onSnapshot, query, orderBy, Timestamp, deleteDoc, doc, updateDoc, getDocs } from "firebase/firestore";
 import { db } from "./lib/firebase";
@@ -207,6 +213,10 @@ export default function App() {
   const [showExamPaperModal, setShowExamPaperModal] = useState(false);
   const [examPaperYear, setExamPaperYear] = useState<string>(() => new Date().getFullYear().toString());
   const [examPaperType, setExamPaperType] = useState<'student' | 'teacher'>('student');
+  const [examPreviewTab, setExamPreviewTab] = useState<'both' | 'page1' | 'page2'>('both');
+  const [examPreviewZoom, setExamPreviewZoom] = useState<'normal' | 'large' | 'xlarge' | 'xxlarge'>('large');
+  const [isExamModalMaximized, setIsExamModalMaximized] = useState(false);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
 
   // QR Code 공유 모달 상태
   const [showQrModal, setShowQrModal] = useState(false);
@@ -369,7 +379,55 @@ export default function App() {
       }
     }
 
-    // Firestore 실시간 리스너: createdAt 누락 문서도 100% 감지 및 삭제할 수 있도록 collection 직접 구독
+    // 2. Fetch Exam History from Firestore (Firebase 무료 Spark 플랜 150인 동시 접속 최적화)
+    // 150명 일반 응시자는 지속적인 WebSocket 실시간 리스너(100개 제한)를 점유하지 않고 단발성 getDocs로 조회하며,
+    // 실시간 모니터링이 필요한 관리자 화면(isAdminMode)에서만 onSnapshot 실시간 스트림을 구독합니다.
+    fetchExamHistoryOnce();
+  }, []);
+
+  // 단발성 Firestore 데이터 가져오기 헬퍼 (일반 수험생 및 새로고침용: 무료 플랜 소켓 연결 0개 소모)
+  const fetchExamHistoryOnce = async () => {
+    try {
+      const querySnapshot = await getDocs(collection(db, "exam_history"));
+      const historyData: ExamHistory[] = [];
+      querySnapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        const docDate = data.date || "";
+        const fallbackYear = docDate ? parseInt(docDate.split('-')[0], 10) : new Date().getFullYear();
+        const recordYear = data.year || (isNaN(fallbackYear) ? new Date().getFullYear() : fallbackYear);
+        
+        historyData.push({ 
+          id: docSnap.id, 
+          ...data,
+          name: (data.name || "").trim(),
+          dept: (data.dept || "").trim(),
+          year: recordYear
+        } as ExamHistory);
+      });
+
+      // 최신 등록 순으로 정렬
+      historyData.sort((a, b) => {
+        const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.date ? new Date(a.date).getTime() : 0);
+        const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.date ? new Date(b.date).getTime() : 0);
+        return timeB - timeA;
+      });
+
+      setExamHistory(historyData);
+      setFirebaseError(null);
+      setIsHistoryLoaded(true);
+      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(historyData));
+      return historyData;
+    } catch (err: any) {
+      console.warn("fetchExamHistoryOnce fallback error:", err);
+      setIsHistoryLoaded(true);
+      return [];
+    }
+  };
+
+  // 관리자 모드(isAdminMode)일 때만 실시간 스트림 onSnapshot 리스너 가동 (관리자 1~2명만 연결 소모)
+  useEffect(() => {
+    if (!isAdminMode) return;
+
     const unsubscribe = onSnapshot(collection(db, "exam_history"), (snapshot) => {
       const historyData: ExamHistory[] = [];
       snapshot.forEach((docSnap) => {
@@ -387,7 +445,6 @@ export default function App() {
         } as ExamHistory);
       });
 
-      // 최신 등록 순으로 정렬 (createdAt 또는 date 기준)
       historyData.sort((a, b) => {
         const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.date ? new Date(a.date).getTime() : 0);
         const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.date ? new Date(b.date).getTime() : 0);
@@ -399,13 +456,12 @@ export default function App() {
       setIsHistoryLoaded(true);
       localStorage.setItem("haccp_exam_history_admin", JSON.stringify(historyData));
     }, (error) => {
-      console.error("Firestore onSnapshot error:", error);
+      console.error("Admin Firestore onSnapshot error:", error);
       setFirebaseError(error.code || "error");
-      setIsHistoryLoaded(true);
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [isAdminMode]);
 
   // 3. Timer Effect (30분 제한 시간 관리)
   useEffect(() => {
@@ -1135,57 +1191,161 @@ export default function App() {
   const downloadExcelReport = () => {
     if (examHistory.length === 0) return;
 
+    // 인원별(사원별) 1차 및 2차 시험 결과 그룹화
+    const personSummaries = groupExamsByPerson(examHistory);
+    // 가나다 성명순 정렬
+    personSummaries.sort((a, b) => (a.name || "").localeCompare(b.name || "", "ko"));
+
     const headers = [
       "연도",
-      "수험 번호",
       "성명",
       "소속 부서/팀",
-      "응시일",
-      "점수",
+      "수험 번호",
+      "시험 구분",
+      "응시 일자",
+      "취득 점수",
       "판정 결과",
-      "맞은 개수",
-      "틀린 개수"
+      "정답 수 (배점 5점)",
+      "오답 수",
+      "재시험 승인 상태",
+      "개인 최종 수료 상태"
     ];
 
+    // Q1 ~ Q20 문항 답안 및 정오(O/X) 판정 헤더
     for (let i = 1; i <= 20; i++) {
       headers.push(`Q${i} 제출답안`, `Q${i} 판정`);
     }
 
     const csvRows = [headers.join(",")];
 
-    examHistory.forEach(record => {
-      const score = record.score;
-      const status = score >= 70 ? "합격" : score >= 50 ? "재평가" : "재교육+재평가";
-      const correctAnsCount = Math.round(score / 5);
-      const wrongAnsCount = 20 - correctAnsCount;
-      const recYear = record.year || (record.date ? parseInt(record.date.split('-')[0], 10) : new Date().getFullYear());
-      const idNo = record.idNo || `HS-${recYear}-기록없음`;
+    personSummaries.forEach(person => {
+      const recYear = person.year || new Date().getFullYear();
+      const idNo = person.idNo || `HS-${recYear}-미부여`;
+      const name = person.name || "성명 미입력";
+      const dept = person.dept || "부서 미지정";
 
-      const row = [
+      // 개인 최종 수료 상태 문구
+      let finalStatusText = "";
+      if (person.finalStatus === "1st_passed") finalStatusText = "1차 최종 합격 (수료)";
+      else if (person.finalStatus === "2nd_passed") finalStatusText = "2차 재시험 합격 (수료)";
+      else if (person.finalStatus === "2nd_failed") finalStatusText = "2차 불합격 (재교육 대상)";
+      else if (person.finalStatus === "reexam_ready") finalStatusText = "재시험 대기 (승인 완료)";
+      else finalStatusText = "1차 불합격 (승인 대기)";
+
+      // ----------------------------------------------------
+      // ROW 1: 1차 정기평가 행
+      // ----------------------------------------------------
+      const first = person.firstExam;
+      const has1st = Boolean(first);
+      const firstScore = has1st ? first!.score : 0;
+      const firstPassed = has1st ? firstScore >= passingScoreThreshold : false;
+      const firstCorrect = has1st ? Math.round(firstScore / 5) : 0;
+      const firstWrong = has1st ? 20 - firstCorrect : 0;
+      const firstDate = has1st ? first!.date : "-";
+
+      const firstRow = [
         `"${recYear}년"`,
+        `"${name.replace(/"/g, '""')}"`,
+        `"${dept.replace(/"/g, '""')}"`,
         `"${idNo}"`,
-        `"${record.name.replace(/"/g, '""')}"`,
-        `"${record.dept.replace(/"/g, '""')}"`,
-        `"${record.date}"`,
-        `"${score}점"`,
-        `"${status}"`,
-        `"${correctAnsCount}개"`,
-        `"${wrongAnsCount}개"`
+        `"1차 정기평가"`,
+        has1st ? `"${firstDate}"` : `"미응시"`,
+        has1st ? `"${firstScore}점"` : `"-"`,
+        has1st ? `"${firstPassed ? "1차 합격" : "재평가 대상 (불합격)"}"` : `"미응시"`,
+        has1st ? `"${firstCorrect}개"` : `"-"`,
+        has1st ? `"${firstWrong}개"` : `"-"`,
+        firstPassed ? `"비해당 (1차 합격)"` : person.isReexamApproved ? `"승인 완료 (응시 가능)"` : `"미승인 (승인 대기)"`,
+        `"${finalStatusText}"`
       ];
 
       for (let i = 1; i <= 20; i++) {
         const q = haccpQuestions.find(question => question.id === i);
-        const userAns = record.answers ? record.answers[i] : undefined;
-
+        const userAns = first?.answers ? first.answers[i] : undefined;
         if (userAns === undefined) {
-          row.push(`"미응답"`, `"-"`);
+          firstRow.push(`"-"`, `"-"`);
         } else {
           const isCorrect = q && userAns === q.correctAnswer;
-          row.push(`"${userAns}번"`, `"${isCorrect ? "O" : "X"}"`);
+          firstRow.push(`"${userAns}번"`, `"${isCorrect ? "O" : "X"}"`);
         }
       }
 
-      csvRows.push(row.join(","));
+      csvRows.push(firstRow.join(","));
+
+      // ----------------------------------------------------
+      // ROW 2: 2차 재시험 행
+      // ----------------------------------------------------
+      const second = person.secondExam;
+      const has2nd = Boolean(second);
+
+      if (has2nd) {
+        const secondScore = second!.score;
+        const secondPassed = secondScore >= passingScoreThreshold;
+        const secondCorrect = Math.round(secondScore / 5);
+        const secondWrong = 20 - secondCorrect;
+        const secondDate = second!.date;
+
+        const secondRow = [
+          `"${recYear}년"`,
+          `"${name.replace(/"/g, '""')}"`,
+          `"${dept.replace(/"/g, '""')}"`,
+          `"${idNo}"`,
+          `"2차 재시험"`,
+          `"${secondDate}"`,
+          `"${secondScore}점"`,
+          `"${secondPassed ? "2차 재시험 합격" : "2차 불합격 (재교육 대상)"}"`,
+          `"${secondCorrect}개"`,
+          `"${secondWrong}개"`,
+          `"재시험 응시완료"`,
+          `"${finalStatusText}"`
+        ];
+
+        for (let i = 1; i <= 20; i++) {
+          const q = haccpQuestions.find(question => question.id === i);
+          const userAns = second?.answers ? second.answers[i] : undefined;
+          if (userAns === undefined) {
+            secondRow.push(`"-"`, `"-"`);
+          } else {
+            const isCorrect = q && userAns === q.correctAnswer;
+            secondRow.push(`"${userAns}번"`, `"${isCorrect ? "O" : "X"}"`);
+          }
+        }
+
+        csvRows.push(secondRow.join(","));
+      } else {
+        // 2차 재시험을 아직 치르지 않은 경우 (1차 합격으로 비해당이거나, 불합격 후 재시험 대기 중)
+        const secondStatusDesc = firstPassed
+          ? "해당 없음 (1차 합격 수료)"
+          : person.isReexamApproved
+            ? "재시험 대기 (승인 완료)"
+            : "재시험 대기 (품질보증팀 미승인)";
+
+        const secondApprovalDesc = firstPassed
+          ? "비해당 (1차 합격)"
+          : person.isReexamApproved
+            ? "승인 완료 (응시 가능)"
+            : "미승인 (대기)";
+
+        const secondRow = [
+          `"${recYear}년"`,
+          `"${name.replace(/"/g, '""')}"`,
+          `"${dept.replace(/"/g, '""')}"`,
+          `"${idNo}"`,
+          `"2차 재시험"`,
+          `"-"`,
+          `"-"`,
+          `"${secondStatusDesc}"`,
+          `"-"`,
+          `"-"`,
+          `"${secondApprovalDesc}"`,
+          `"${finalStatusText}"`
+        ];
+
+        for (let i = 1; i <= 20; i++) {
+          secondRow.push(`"-"`, `"-"`);
+        }
+
+        csvRows.push(secondRow.join(","));
+      }
     });
 
     const csvContent = "\uFEFF" + csvRows.join("\n");
@@ -1193,86 +1353,823 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    link.setAttribute("download", `국순당_HACCP_내부평가_결과보고서_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute("download", `국순당_HACCP_평가결과보고서_(1차·2차_행구분)_${new Date().toISOString().split('T')[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
-  // 시험지 DOC 파일 저장 (Word / HWP 호환)
+  // 새 창 / 팝업으로 큰 화면 시험지 열기 (인쇄 및 가독성 최적화)
+  const handleOpenExamPaperWindow = (autoPrint: boolean = false) => {
+    try {
+      const printContainer = document.querySelector('.print-only');
+      if (!printContainer) {
+        showAdminToast("시험지 내용을 불러오는 중입니다. 다시 시도해주세요.", "error");
+        return;
+      }
+
+      const popupWin = window.open('', '_blank', 'width=1100,height=950,scrollbars=yes,resizable=yes');
+      if (!popupWin) {
+        showAdminToast("팝업 창 차단을 해제하시면 시험지를 새 창 및 인쇄 화면으로 바로 보실 수 있습니다.", "info");
+        return;
+      }
+
+      popupWin.document.open();
+      popupWin.document.write(`
+        <!DOCTYPE html>
+        <html lang="ko">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지 - 국순당</title>
+          <style>
+            @page {
+              size: A4 portrait;
+              margin: 5mm 6mm 5mm 6mm;
+            }
+            * {
+              box-sizing: border-box;
+              margin: 0;
+              padding: 0;
+              -webkit-print-color-adjust: exact !important;
+              print-color-adjust: exact !important;
+            }
+            html, body {
+              font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
+              background: #f1f5f9;
+              color: #111827;
+              width: 100%;
+            }
+            body {
+              padding: 20px;
+            }
+            .no-print-toolbar {
+              max-width: 210mm;
+              margin: 0 auto 16px auto;
+              background: #ffffff;
+              padding: 12px 18px;
+              border-radius: 12px;
+              box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              border: 1px solid #e2e8f0;
+            }
+            .toolbar-btn {
+              padding: 8px 16px;
+              border-radius: 8px;
+              font-size: 13px;
+              font-weight: bold;
+              border: none;
+              cursor: pointer;
+              transition: all 0.2s;
+            }
+            .btn-print {
+              background: #047857;
+              color: white;
+            }
+            .btn-print:hover {
+              background: #065f46;
+            }
+            .btn-close {
+              background: #4b5563;
+              color: white;
+            }
+            .paper-wrapper {
+              max-width: 210mm;
+              margin: 0 auto;
+              background: white;
+              box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+            }
+            .print-page {
+              width: 100%;
+              box-sizing: border-box;
+              display: flex;
+              flex-direction: column;
+              justify-content: space-between;
+              page-break-after: always;
+              break-after: page;
+              background: white;
+              overflow: visible;
+            }
+            .print-page:last-child {
+              page-break-after: auto;
+              break-after: auto;
+            }
+            table {
+              border-collapse: collapse;
+              width: 100%;
+            }
+            @media print {
+              html, body {
+                background: white !important;
+                padding: 0 !important;
+                margin: 0 !important;
+              }
+              .no-print-toolbar {
+                display: none !important;
+              }
+              .paper-wrapper {
+                box-shadow: none !important;
+                margin: 0 !important;
+                max-width: 100% !important;
+                width: 100% !important;
+              }
+              .print-page {
+                min-height: 0 !important;
+                page-break-after: always !important;
+                break-after: page !important;
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
+                overflow: visible !important;
+              }
+              .print-page:last-child {
+                page-break-after: auto !important;
+                break-after: auto !important;
+              }
+            }
+          </style>
+          <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css">
+        </head>
+        <body>
+          <div class="no-print-toolbar">
+            <div>
+              <strong style="font-size: 15px; color: #0f172a;">${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지 (양면 1장)</strong>
+              <div style="font-size: 12px; color: #64748b; margin-top: 2px;">
+                첫번째 장(1~10번) · 두번째 장(11~20번) 맑은고딕 가독성 최적화
+              </div>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button class="toolbar-btn btn-print" onclick="window.print();">🖨️ 바로 인쇄하기</button>
+              <button class="toolbar-btn btn-close" onclick="window.close();">창 닫기</button>
+            </div>
+          </div>
+          <div class="paper-wrapper">
+            ${printContainer.innerHTML}
+          </div>
+          <script>
+            window.addEventListener('load', function() {
+              ${autoPrint ? `
+                setTimeout(function() {
+                  window.focus();
+                  window.print();
+                }, 400);
+              ` : ''}
+            });
+          </script>
+        </body>
+        </html>
+      `);
+      popupWin.document.close();
+      showAdminToast("시험지가 새 창(팝업)으로 활성화되었습니다.", "success");
+    } catch (e) {
+      console.error("Popup window error:", e);
+      window.print();
+    }
+  };
+
+  // 1. 시험지 인쇄 (A4 양면 1장 최적화: 앞면 1~10번 2단 / 뒷면 11~20번 2단)
+  const handlePrintExamPaper = () => {
+    try {
+      showAdminToast("시험지 인쇄 창을 활성화합니다. 인쇄 설정에서 '양면 인쇄(긴 면으로 넘김)'를 확인해주세요.", "info");
+
+      // 1순위: 팝업 인쇄 창 시도 (브라우저 iframe 샌드박스 차단 없이 가장 확실하게 인쇄 대화상자 호출)
+      const printContainer = document.querySelector('.print-only');
+      if (printContainer) {
+        const popupWin = window.open('', '_blank', 'width=1050,height=950,scrollbars=yes,resizable=yes');
+        if (popupWin) {
+          popupWin.document.open();
+          popupWin.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <title>${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지</title>
+              <style>
+                @page {
+                  size: A4 portrait;
+                  margin: 5mm 6mm 5mm 6mm;
+                }
+                * {
+                  box-sizing: border-box;
+                  margin: 0;
+                  padding: 0;
+                  -webkit-print-color-adjust: exact !important;
+                  print-color-adjust: exact !important;
+                }
+                html, body {
+                  font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
+                  background: white;
+                  color: #111827;
+                  width: 100%;
+                  margin: 0;
+                  padding: 0;
+                }
+                .print-page {
+                  width: 100%;
+                  box-sizing: border-box;
+                  display: flex;
+                  flex-direction: column;
+                  justify-content: space-between;
+                  page-break-after: always;
+                  break-after: page;
+                  overflow: visible;
+                }
+                .print-page:last-child {
+                  page-break-after: auto;
+                  break-after: auto;
+                }
+                table {
+                  border-collapse: collapse;
+                  width: 100%;
+                }
+                @media print {
+                  .no-print { display: none !important; }
+                  html, body {
+                    background: white !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                  }
+                  .print-page {
+                    min-height: 0 !important;
+                    page-break-after: always !important;
+                    break-after: page !important;
+                    page-break-inside: avoid !important;
+                    break-inside: avoid !important;
+                    overflow: visible !important;
+                  }
+                  .print-page:last-child {
+                    page-break-after: auto !important;
+                    break-after: auto !important;
+                  }
+                }
+              </style>
+              <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css">
+            </head>
+            <body>
+              <div class="no-print" style="position: fixed; top: 10px; right: 10px; z-index: 9999; background: #047857; color: white; padding: 10px 16px; border-radius: 8px; font-size: 13px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.2);" onclick="window.print()">
+                🖨️ 인쇄 대화상자 열기
+              </div>
+              ${printContainer.innerHTML}
+              <script>
+                window.addEventListener('load', function() {
+                  setTimeout(function() {
+                    window.focus();
+                    window.print();
+                  }, 400);
+                });
+              </script>
+            </body>
+            </html>
+          `);
+          popupWin.document.close();
+          return;
+        }
+
+        // 팝업이 브라우저에서 차단된 경우 fallback iframe 인쇄
+        const iframe = document.createElement('iframe');
+        iframe.style.position = 'fixed';
+        iframe.style.right = '0';
+        iframe.style.bottom = '0';
+        iframe.style.width = '0';
+        iframe.style.height = '0';
+        iframe.style.border = '0';
+        document.body.appendChild(iframe);
+
+        const iframeDoc = iframe.contentWindow?.document || iframe.contentDocument;
+        if (iframeDoc && iframe.contentWindow) {
+          iframeDoc.open();
+          iframeDoc.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <title>${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지</title>
+              <style>
+                @page {
+                  size: A4 portrait;
+                  margin: 5mm 6mm 5mm 6mm;
+                }
+                * {
+                  box-sizing: border-box;
+                  margin: 0;
+                  padding: 0;
+                  -webkit-print-color-adjust: exact !important;
+                  print-color-adjust: exact !important;
+                }
+                html, body {
+                  font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
+                  background: white;
+                  color: #111827;
+                  width: 100%;
+                  margin: 0;
+                  padding: 0;
+                }
+                .print-page {
+                  width: 100%;
+                  box-sizing: border-box;
+                  display: flex;
+                  flex-direction: column;
+                  justify-content: space-between;
+                  page-break-after: always;
+                  break-after: page;
+                  overflow: visible;
+                }
+                .print-page:last-child {
+                  page-break-after: auto;
+                  break-after: auto;
+                }
+                table {
+                  border-collapse: collapse;
+                  width: 100%;
+                }
+                @media print {
+                  html, body {
+                    background: white !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                  }
+                  .print-page {
+                    min-height: 0 !important;
+                    page-break-after: always !important;
+                    break-after: page !important;
+                    page-break-inside: avoid !important;
+                    break-inside: avoid !important;
+                    overflow: visible !important;
+                  }
+                  .print-page:last-child {
+                    page-break-after: auto !important;
+                    break-after: auto !important;
+                  }
+                }
+              </style>
+              <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css">
+            </head>
+            <body>
+              ${printContainer.innerHTML}
+            </body>
+            </html>
+          `);
+          iframeDoc.close();
+
+          setTimeout(() => {
+            try {
+              iframe.contentWindow?.focus();
+              iframe.contentWindow?.print();
+            } catch (iframeErr) {
+              console.warn("Iframe print error, falling back to window.print:", iframeErr);
+              document.body.classList.add("kooksoondang-printing-exam");
+              window.print();
+              setTimeout(() => {
+                document.body.classList.remove("kooksoondang-printing-exam");
+              }, 1000);
+            } finally {
+              setTimeout(() => {
+                if (document.body.contains(iframe)) {
+                  document.body.removeChild(iframe);
+                }
+              }, 2000);
+            }
+          }, 350);
+          return;
+        }
+      }
+
+      // 기본 fallback
+      document.body.classList.add("kooksoondang-printing-exam");
+      setTimeout(() => {
+        try {
+          window.print();
+        } finally {
+          setTimeout(() => {
+            document.body.classList.remove("kooksoondang-printing-exam");
+          }, 1000);
+        }
+      }, 150);
+    } catch {
+      window.print();
+    }
+  };
+
+  // 2. 시험지 PDF 파일 직접 다운로드 (A4 양면 1장 규격 / 2페이지 완벽 분할 / 굴림체 / 가독성 강화)
+  const handleDownloadExamPdf = async () => {
+    try {
+      setIsGeneratingPdf(true);
+      showAdminToast("가독성을 높인 A4 양면 1장 규격 PDF 파일을 생성 중입니다...", "info");
+
+      const yearText = examPaperYear || new Date().getFullYear().toString();
+      const isTeacher = examPaperType === 'teacher';
+      const fileName = `${yearText}년도_국순당_HACCP_위생교육_평가시험지(양면1장)${isTeacher ? '_정답해설지' : ''}.pdf`;
+      const circleChars = ['①', '②', '③', '④', '⑤'];
+
+      const renderQuestionsPdf = (questions: typeof haccpQuestions, startIndex: number) => {
+        return questions.map((q, qIdx) => {
+          const num = startIndex + qIdx + 1;
+          return `
+            <div style="margin-bottom: 14px; padding-bottom: 4px; page-break-inside: avoid;">
+              <div style="font-weight: bold; font-size: 11.5px; color: #111827; line-height: 1.38; margin-bottom: 5px; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+                ${num}. ${q.text}
+              </div>
+              ${q.context ? `
+                <div style="background: #f3f4f6; border: 1px solid #d1d5db; padding: 3px 6px; font-size: 9.8px; color: #374151; margin-bottom: 5px; line-height: 1.32; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+                  ${q.context}
+                </div>
+              ` : ''}
+              <div style="padding-left: 2px; font-size: 10.8px; color: #1f2937; line-height: 1.35; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+                ${q.options.map((opt, oIdx) => `
+                  <div style="display: flex; align-items: flex-start; gap: 3px; margin-bottom: 2px;">
+                    <span style="font-weight: bold; color: #111827; flex-shrink: 0;">${circleChars[oIdx] || `(${oIdx + 1})`}</span>
+                    <span>${opt}${isTeacher && q.correctAnswer === oIdx + 1 ? '<b style="color: #047857; margin-left: 4px;">[★ 정답]</b>' : ''}</span>
+                  </div>
+                `).join('')}
+              </div>
+              ${isTeacher ? `
+                <div style="background: #ecfdf5; border: 1px solid #10b981; border-radius: 3px; padding: 2.5px 6px; margin-top: 4px; font-size: 9.8px; color: #065f46; line-height: 1.32; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+                  <b>[정답: ${q.correctAnswer}번]</b> ${q.explanation}
+                </div>
+              ` : ''}
+            </div>
+          `;
+        }).join('');
+      };
+
+      // 가상 렌더링 컨테이너 생성 (A4 96 DPI: 794px × 1123px)
+      const container = document.createElement("div");
+      container.style.position = "fixed";
+      container.style.left = "-9999px";
+      container.style.top = "0";
+      container.style.width = "794px";
+      container.style.backgroundColor = "#ffffff";
+      container.style.color = "#111827";
+      container.style.boxSizing = "border-box";
+      container.style.fontFamily = "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif";
+
+      container.innerHTML = `
+        <!-- PAGE 1 (앞면: 1~10번) -->
+        <div id="pdf-page-1" style="width: 794px; height: 1123px; padding: 18px 24px 16px 24px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; background: #ffffff; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+          <div>
+            <div style="text-align: center; margin-bottom: 6px;">
+              <div style="font-size: 10px; font-weight: bold; letter-spacing: 2px; color: #4b5563; margin-bottom: 2px;">
+                KOOKSOONDANG | 주식회사 국순당 횡성양조장
+              </div>
+              <h1 style="font-size: 17px; font-weight: bold; margin: 0 0 2px 0; color: #111827; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+                ${yearText}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지
+              </h1>
+              <div style="font-size: 10.5px; color: #4b5563; font-weight: bold;">
+                주관 부서: 품질보증팀 &nbsp;|&nbsp; ${isTeacher ? '[ 관리자용 정답 및 해설지 (제 1 면 - 앞면: 1~10번) ]' : '[ 수험생 응시용 문제지 (제 1 면 - 앞면: 1~10번) ]'}
+              </div>
+            </div>
+
+            <table style="width: 100%; border-collapse: collapse; margin-bottom: 5px; font-size: 10.5px; text-align: center; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+              <tbody>
+                <tr>
+                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 2.5px 4px; font-weight: bold;" width="12%">소 속</th>
+                  <td style="border: 1px solid #1f2937; padding: 2.5px 4px;" width="24%"></td>
+                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 2.5px 4px; font-weight: bold;" width="12%">성 명</th>
+                  <td style="border: 1px solid #1f2937; padding: 2.5px 4px;" width="24%"></td>
+                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 2.5px 4px; font-weight: bold;" width="14%">결 재</th>
+                  <td style="border: 1px solid #1f2937; padding: 2.5px 4px; font-size: 9.5px; font-weight: 500;" width="14%">담당 / 팀장</td>
+                </tr>
+                <tr>
+                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 2.5px 4px; font-weight: bold;">평가 일자</th>
+                  <td style="border: 1px solid #1f2937; padding: 2.5px 4px;">${yearText}년 ___월 ___일</td>
+                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 2.5px 4px; font-weight: bold;">평가 점수</th>
+                  <td style="border: 1px solid #1f2937; padding: 2.5px 4px; font-weight: bold;">_____ 점 / 100점</td>
+                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 2.5px 4px; font-weight: bold;">판 정</th>
+                  <td style="border: 1px solid #1f2937; padding: 2.5px 4px; font-size: 9.5px; font-weight: bold;">[ 합격 / 재평가 ]</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div style="border: 1px solid #9ca3af; background: #f9fafb; padding: 3px 8px; margin-bottom: 7px; font-size: 10px; line-height: 1.35; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+              <b>[평가 안내사항]</b> ① 총 20문항(문항당 5점 배점)이며 70점 이상 합격입니다. ② 첫번째 장(앞면): 1~10번 / 두번째 장(뒷면): 11~20번입니다.
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; position: relative;">
+              <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #cbd5e1; transform: translateX(-50%);"></div>
+              <div style="padding-right: 8px;">
+                ${renderQuestionsPdf(haccpQuestions.slice(0, 5), 0)}
+              </div>
+              <div style="padding-left: 8px;">
+                ${renderQuestionsPdf(haccpQuestions.slice(5, 10), 5)}
+              </div>
+            </div>
+          </div>
+
+          <div style="border-top: 1px solid #cbd5e1; padding-top: 4px; text-align: center; font-size: 10px; color: #4b5563; font-weight: bold; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+            - 1 / 2 면 [ 다음 면(뒷면) 11~20번에 계속 ] -
+          </div>
+        </div>
+
+        <!-- PAGE 2 (뒷면: 11~20번) -->
+        <div id="pdf-page-2" style="width: 794px; height: 1123px; padding: 18px 24px 16px 24px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; background: #ffffff; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+          <div>
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1.5px solid #1f2937; padding-bottom: 4px; margin-bottom: 7px; font-size: 10.5px; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+              <span style="font-weight: bold; font-size: 12px; color: #111827;">
+                ${yearText}년도 HACCP 정기 위생교육 평가 시험지 (제 2 면 - 뒷면: 11~20번)
+              </span>
+              <span style="font-weight: bold; color: #374151;">성명: __________________ &nbsp;&nbsp; 소속: __________________</span>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; position: relative;">
+              <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #cbd5e1; transform: translateX(-50%);"></div>
+              <div style="padding-right: 8px;">
+                ${renderQuestionsPdf(haccpQuestions.slice(10, 15), 10)}
+              </div>
+              <div style="padding-left: 8px;">
+                ${renderQuestionsPdf(haccpQuestions.slice(15, 20), 15)}
+              </div>
+            </div>
+
+            <div style="border: 1px solid #9ca3af; background: #f9fafb; padding: 3px 8px; text-align: center; font-size: 10px; color: #374151; margin-top: 7px; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+              <b>[ - 이하 여백 - ]</b> 문제 풀이를 완료하신 후 기재사항 및 누락된 문항이 없는지 다시 점검하십시오. 수고하셨습니다.
+            </div>
+          </div>
+
+          <div style="border-top: 1px solid #cbd5e1; padding-top: 4px; display: flex; justify-content: space-between; font-size: 10px; color: #4b5563; font-weight: bold; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+            <span>주식회사 국순당 품질보증팀</span>
+            <span>- 2 / 2 면 (끝) -</span>
+            <span>HACCP 식품안전관리인증기준</span>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(container);
+
+      const page1El = container.querySelector("#pdf-page-1") as HTMLElement;
+      const page2El = container.querySelector("#pdf-page-2") as HTMLElement;
+
+      const canvas1 = await html2canvas(page1El, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+        logging: false
+      });
+
+      const canvas2 = await html2canvas(page2El, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+        logging: false
+      });
+
+      document.body.removeChild(container);
+
+      const pdf = new jsPDF({
+        orientation: "portrait",
+        unit: "mm",
+        format: "a4"
+      });
+
+      const imgData1 = canvas1.toDataURL("image/jpeg", 0.95);
+      pdf.addImage(imgData1, "JPEG", 0, 0, 210, 297);
+
+      pdf.addPage();
+      const imgData2 = canvas2.toDataURL("image/jpeg", 0.95);
+      pdf.addImage(imgData2, "JPEG", 0, 0, 210, 297);
+
+      pdf.save(fileName);
+      showAdminToast("가독성 높은 2페이지 양면 1장 규격 PDF 저장이 완료되었습니다.", "success");
+    } catch (err) {
+      console.error("PDF generation failed:", err);
+      showAdminToast("PDF 직접 생성 중 오류가 발생했습니다. 브라우저 인쇄 기능을 이용해주세요.", "error");
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  };
+
+  // 3. 시험지 DOC 파일 저장 (Word 전용: A4 양면 1장 2단 다단 완벽 2페이지 최적화 / 굴림체 / 문항 간 공백 추가 및 가독성 꽉 차도록 조절)
   const handleDownloadExamDoc = () => {
     const yearText = examPaperYear || new Date().getFullYear().toString();
     const title = `${yearText}년도 국순당 HACCP 및 선행요건 정기 위생교육 평가 시험지`;
-    
-    let content = `
+    const isTeacher = examPaperType === 'teacher';
+    const circleChars = ['①', '②', '③', '④', '⑤'];
+
+    const renderWordQuestions = (questions: typeof haccpQuestions, startIndex: number) => {
+      return questions.map((q, qIdx) => {
+        const num = startIndex + qIdx + 1;
+        return `
+          <div style="margin-bottom: 9pt; page-break-inside: avoid; mso-line-height-rule: exactly; font-family: 'Gulim', '굴림', 'GulimChe', sans-serif;">
+            <div style="font-size: 10.5pt; font-weight: bold; color: #111111; line-height: 1.35; margin-bottom: 2.5pt;">
+              ${num}. ${q.text}
+            </div>
+            ${q.context ? `
+              <div style="background-color: #f3f4f6; border: 0.5pt solid #d1d5db; padding: 2.5pt 4.5pt; font-size: 9.2pt; color: #374151; margin-bottom: 2.5pt; line-height: 1.28;">
+                ${q.context}
+              </div>
+            ` : ''}
+            <div style="padding-left: 2pt;">
+              ${q.options.map((opt, oIdx) => `
+                <div style="font-size: 9.8pt; color: #111111; line-height: 1.32; margin-bottom: 1.8pt;">
+                  <b style="color: #111111;">${circleChars[oIdx] || `(${oIdx + 1})`}</b> ${opt}
+                  ${isTeacher && q.correctAnswer === oIdx + 1 ? '<b style="color: #15803d; margin-left: 3pt;">[★ 정답]</b>' : ''}
+                </div>
+              `).join('')}
+            </div>
+            ${isTeacher ? `
+              <div style="background-color: #f0fdf4; border: 0.5pt solid #86efac; padding: 2.5pt 4.5pt; margin-top: 2.5pt; font-size: 9pt; color: #166534; line-height: 1.28;">
+                <b>[정답: ${q.correctAnswer}번]</b> ${q.explanation}
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }).join('');
+    };
+
+    const content = `
     <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
     <head>
       <meta charset='utf-8'>
       <title>${title}</title>
+      <!--[if gte mso 9]>
+      <xml>
+        <w:WordDocument>
+          <w:View>Print</w:View>
+          <w:Zoom>100</w:Zoom>
+          <w:DoNotOptimizeForBrowser/>
+        </w:WordDocument>
+      </xml>
+      <![endif]-->
       <style>
-        body { font-family: 'Malgun Gothic', '맑은 고딕', sans-serif; padding: 20px; line-height: 1.6; color: #1c1c1c; }
-        h1 { text-align: center; font-size: 18pt; margin-bottom: 4px; color: #1c1c1c; font-weight: bold; }
-        .company-tag { text-align: center; font-size: 10pt; color: #e85b24; font-weight: bold; letter-spacing: 2px; margin-bottom: 15px; }
-        table.header-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-        table.header-table td, table.header-table th { border: 1px solid #333; padding: 6px; text-align: center; font-size: 10pt; }
-        .instructions { background: #f8f8f8; border: 1px solid #ccc; padding: 10px; margin-bottom: 20px; font-size: 9.5pt; }
-        .q-item { margin-bottom: 18px; page-break-inside: avoid; }
-        .q-title { font-weight: bold; font-size: 11pt; margin-bottom: 6px; }
-        .q-options { margin-left: 15px; font-size: 10pt; }
-        .q-opt { margin-bottom: 3px; }
-        .ans-key { background: #e8f5e9; border: 1px solid #4caf50; padding: 6px 10px; margin-top: 6px; font-size: 9.5pt; color: #1b5e20; border-radius: 4px; }
+        @page Section1 {
+          size: 210mm 297mm;
+          margin: 6mm 8mm 6mm 8mm;
+          mso-header-margin: 3mm;
+          mso-footer-margin: 3mm;
+          mso-paper-source: 0;
+        }
+        div.Section1 {
+          page: Section1;
+        }
+        body {
+          font-family: 'Gulim', '굴림', 'GulimChe', '굴림체', sans-serif;
+          font-size: 9.8pt;
+          line-height: 1.32;
+          color: #111111;
+          margin: 0;
+          padding: 0;
+        }
+        .comp-brand {
+          text-align: center;
+          font-size: 8.5pt;
+          color: #4b5563;
+          font-weight: bold;
+          letter-spacing: 1.5px;
+          margin-bottom: 1pt;
+        }
+        h1 {
+          text-align: center;
+          font-size: 14pt;
+          font-weight: bold;
+          margin: 0 0 1pt 0;
+          color: #111111;
+          font-family: 'Gulim', '굴림', sans-serif;
+        }
+        .sub-title {
+          text-align: center;
+          font-size: 9pt;
+          color: #374151;
+          font-weight: bold;
+          margin-bottom: 2.5pt;
+        }
+        table.hdr-table {
+          width: 100%;
+          border-collapse: collapse;
+          margin-bottom: 2.5pt;
+        }
+        table.hdr-table th, table.hdr-table td {
+          border: 0.5pt solid #333333;
+          padding: 2pt 3pt;
+          font-size: 9pt;
+          text-align: center;
+        }
+        table.hdr-table th {
+          background-color: #f2f4f7;
+          font-weight: bold;
+        }
+        .notice-box {
+          border: 0.5pt solid #9ca3af;
+          background-color: #f9fbfd;
+          padding: 2.5pt 5pt;
+          font-size: 8.8pt;
+          line-height: 1.3;
+          margin-bottom: 3pt;
+        }
+        table.two-col-grid {
+          width: 100%;
+          border-collapse: collapse;
+          border: none;
+        }
+        .q-col-left {
+          width: 48.5%;
+          vertical-align: top;
+          padding-right: 7pt;
+          border-right: 0.5pt solid #d1d5db;
+        }
+        .q-col-right {
+          width: 48.5%;
+          vertical-align: top;
+          padding-left: 7pt;
+        }
+        .page-footer {
+          text-align: center;
+          font-size: 8.8pt;
+          color: #4b5563;
+          font-weight: bold;
+          margin-top: 2.5pt;
+          border-top: 0.5pt solid #cbd5e1;
+          padding-top: 2pt;
+        }
+        .page2-header {
+          border-bottom: 0.75pt solid #333333;
+          padding-bottom: 2pt;
+          margin-bottom: 3pt;
+        }
       </style>
     </head>
     <body>
-      <div class="company-tag">KOOKSOONDANG | 주식회사 국순당 횡성양조장</div>
-      <h1>${title}</h1>
-      <div style="text-align:center; font-size:10pt; color:#555; margin-bottom:14px; font-weight:bold;">
-        [ 주관 부서: 품질보증팀 | 대상: 전 임직원 및 생산 작업자 ]
-      </div>
-      
-      <table class="header-table">
-        <tr>
-          <th width="15%">소 속</th>
-          <td width="25%"></td>
-          <th width="15%">성 명</th>
-          <td width="25%"></td>
-          <th width="10%">결 재</th>
-          <td width="10%">담당 / 품질보증팀장</td>
-        </tr>
-        <tr>
-          <th>평가 일자</th>
-          <td>${yearText}년 ___월 ___일</td>
-          <th>평가 점수</th>
-          <td>_____ 점 / 100점</td>
-          <th>판 정</th>
-          <td>[합격 / 재평가 / 재교육+재평가]</td>
-        </tr>
-      </table>
-
-      <div class="instructions">
-        <b>[품질보증팀 평가 안내사항]</b><br>
-        1. 본 시험은 품질보증팀 주관 하에 ${yearText}년도 HACCP 및 선행요건 정기 위생교육 이수자를 대상으로 실시하는 내부 정기 평가입니다.<br>
-        2. 총 20문항이며, 각 문항당 배점은 5점입니다. (70점 이상 합격, 70점 미만 재평가, 50점 미만 재교육+재평가)<br>
-        3. 각 문항을 읽고 가장 알맞은 답의 번호를 하나 골라 선택하시오.
-      </div>
-
-      ${haccpQuestions.map((q, idx) => `
-        <div class="q-item">
-          <div class="q-title">${idx + 1}. ${q.text}</div>
-          <div class="q-options">
-            ${q.options.map((opt, oIdx) => `
-              <div class="q-opt">
-                ${oIdx + 1}) ${opt} ${examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 ? '<b style="color:#2e7d32;">[★ 정답]</b>' : ''}
-              </div>
-            `).join('')}
-          </div>
-          ${examPaperType === 'teacher' ? `
-            <div class="ans-key">
-              <b>[정답: ${q.correctAnswer}번]</b> ${q.explanation}
-            </div>
-          ` : ''}
+      <div class="Section1">
+        <!-- PAGE 1 (앞면: 1번~10번 2단 다단) -->
+        <div class="comp-brand">KOOKSOONDANG | 주식회사 국순당 횡성양조장</div>
+        <h1>${title}</h1>
+        <div class="sub-title">
+          [ 주관 부서: 품질보증팀 | ${isTeacher ? '관리자 정답 및 해설지 (제 1 면 - 앞면: 1~10번)' : '수험생 응시용 문제지 (제 1 면 - 앞면: 1~10번)'} ]
         </div>
-      `).join('')}
+
+        <table class="hdr-table">
+          <tr>
+            <th width="12%">소 속</th>
+            <td width="24%"></td>
+            <th width="12%">성 명</th>
+            <td width="24%"></td>
+            <th width="14%">결 재</th>
+            <td width="14%">담당 / 품질보증팀장</td>
+          </tr>
+          <tr>
+            <th>평가 일자</th>
+            <td>${yearText}년 &nbsp;&nbsp;&nbsp;월 &nbsp;&nbsp;&nbsp;일</td>
+            <th>평가 점수</th>
+            <td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 점 / 100점</td>
+            <th>판 정</th>
+            <td>[ 합격 &nbsp;/&nbsp; 재평가 ]</td>
+          </tr>
+        </table>
+
+        <div class="notice-box">
+          <b>[평가 안내사항]</b> ① 총 20문항(문항당 5점 배점)이며 70점 이상 합격입니다. ② 첫번째 장(앞면): 1~10번 / 두번째 장(뒷면): 11~20번입니다.
+        </div>
+
+        <table class="two-col-grid" cellpadding="0" cellspacing="0">
+          <tr>
+            <td class="q-col-left">
+              <!-- Q 1 ~ 5 -->
+              ${renderWordQuestions(haccpQuestions.slice(0, 5), 0)}
+            </td>
+            <td class="q-col-right">
+              <!-- Q 6 ~ 10 -->
+              ${renderWordQuestions(haccpQuestions.slice(5, 10), 5)}
+            </td>
+          </tr>
+        </table>
+
+        <div class="page-footer">
+          - 1 / 2 면 [ 다음 면(뒷면) 11~20번에 계속 ] -
+        </div>
+
+        <!-- PAGE BREAK FOR DOUBLE-SIDED 1 SHEET (WORD NATIVE PAGE BREAK) -->
+        <br clear="all" style="page-break-before: always; mso-special-character: line-break;" />
+
+        <!-- PAGE 2 (뒷면: 11번~20번 2단 다단) -->
+        <table width="100%" class="page2-header" cellpadding="0" cellspacing="0">
+          <tr>
+            <td align="left" style="font-size: 10pt; font-weight: bold; color: #111111;">
+              ${yearText}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지 (제 2 면 - 뒷면: 11~20번)
+            </td>
+            <td align="right" style="font-size: 9pt; font-weight: bold; color: #333333;">
+              성명: _______________ &nbsp;&nbsp; 소속: _______________
+            </td>
+          </tr>
+        </table>
+
+        <table class="two-col-grid" cellpadding="0" cellspacing="0">
+          <tr>
+            <td class="q-col-left">
+              <!-- Q 11 ~ 15 -->
+              ${renderWordQuestions(haccpQuestions.slice(10, 15), 10)}
+            </td>
+            <td class="q-col-right">
+              <!-- Q 16 ~ 20 -->
+              ${renderWordQuestions(haccpQuestions.slice(15, 20), 15)}
+            </td>
+          </tr>
+        </table>
+
+        <div class="notice-box" style="margin-top: 3pt; text-align: center;">
+          <b>[ - 이하 여백 - ]</b> 문제 풀이를 완료하신 후 기재사항 및 누락된 문항이 없는지 다시 점검하십시오. 수고하셨습니다.
+        </div>
+
+        <div class="page-footer">
+          - 2 / 2 면 (끝) &nbsp;|&nbsp; 주식회사 국순당 품질보증팀 -
+        </div>
+      </div>
     </body>
     </html>
     `;
@@ -1281,11 +2178,12 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${yearText}년도_국순당_HACCP_위생교육_평가시험지${examPaperType === 'teacher' ? '_해답지' : ''}.doc`;
+    a.download = `${yearText}년도_국순당_HACCP_위생교육_평가시험지(양면1장)${isTeacher ? '_해답지' : ''}.doc`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+    showAdminToast("워드 문서(.doc) 저장이 완료되었습니다. A4 규격 2페이지(양면 1장)로 최적화되었습니다.", "success");
   };
 
   // 시험지 TXT 파일 저장
@@ -2001,10 +2899,11 @@ service cloud.firestore {
 
                                   {has1st && (
                                     <button
+                                      type="button"
                                       onClick={() => setSelectedHistoryDetail(person.firstExam!)}
-                                      className="w-full py-1.5 bg-white hover:bg-stone-50 border border-stone-250 text-stone-700 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                                      className="w-full py-2 bg-stone-50 hover:bg-emerald-50 border border-stone-250 hover:border-emerald-300 text-stone-700 hover:text-emerald-900 text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs active:scale-98"
                                     >
-                                      <FileCheck size={13} className="text-stone-500" />
+                                      <FileCheck size={14} className="text-emerald-700" />
                                       1차 시험 OMR 답안 및 문항 확인
                                     </button>
                                   )}
@@ -2117,10 +3016,11 @@ service cloud.firestore {
 
                                   {has2nd && (
                                     <button
+                                      type="button"
                                       onClick={() => setSelectedHistoryDetail(person.secondExam!)}
-                                      className="w-full py-1.5 bg-white hover:bg-stone-50 border border-stone-250 text-stone-700 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                                      className="w-full py-2 bg-stone-50 hover:bg-indigo-50 border border-stone-250 hover:border-indigo-300 text-stone-700 hover:text-indigo-900 text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs active:scale-98"
                                     >
-                                      <FileCheck size={13} className="text-indigo-600" />
+                                      <FileCheck size={14} className="text-indigo-600" />
                                       2차 재시험 OMR 답안 및 문항 확인
                                     </button>
                                   )}
@@ -2311,7 +3211,18 @@ service cloud.firestore {
                                 <FileText size={14} className="text-emerald-800" />
                                 <span>문항별 평가 결과 (정답 여부)</span>
                               </div>
-                              <span className="text-[10px] text-stone-400 font-sans">※ 각 문항 아이콘을 클릭하면 세부 문제 내용 및 정답과 해설이 표시됩니다.</span>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-[10px] text-stone-400 font-sans hidden lg:inline">※ 각 문항 아이콘을 클릭하면 세부 내용 및 정답/해설이 표시됩니다.</span>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedHistoryDetail(record)}
+                                  className="px-2.5 py-1 bg-white hover:bg-stone-50 border border-stone-250 text-stone-700 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1 cursor-pointer shadow-2xs"
+                                  title="해당 응시자의 전체 OMR 답안 및 20문항 상세 확인"
+                                >
+                                  <FileCheck size={13} className="text-emerald-700" />
+                                  전체 OMR 답안 및 문항 상세 확인
+                                </button>
+                              </div>
                             </div>
 
                             <div className="grid grid-cols-5 sm:grid-cols-10 gap-2">
@@ -2503,8 +3414,14 @@ service cloud.firestore {
                                 품질보증팀 승인 후 재시험 응시 가능
                               </button>
                               <button
-                                onClick={() => {
-                                  if (latestRecord.reexamApproved) {
+                                onClick={async () => {
+                                  const refreshed = await fetchExamHistoryOnce();
+                                  const updatedRec = refreshed.find(r => 
+                                    (examinee.idNo && r.idNo === examinee.idNo) ||
+                                    (examinee.name && r.name === examinee.name && examinee.dept && r.dept === examinee.dept)
+                                  ) || latestRecord;
+
+                                  if (updatedRec?.reexamApproved) {
                                     alert("품질보증팀 재시험 승인이 완료되었습니다! 즉시 재시험을 시작할 수 있습니다.");
                                   } else {
                                     alert("현재 품질보증팀 승인 대기 중입니다. 품질보증팀에 승인을 요청해 주세요.");
@@ -3660,6 +4577,282 @@ service cloud.firestore {
           </div>
         )}
 
+        {/* ----------------- MODAL OVERLAY: ADMIN FULL OMR & EXAM DETAIL VIEW (개인별 1차, 2차 OMR 및 문항 확인) ----------------- */}
+        {selectedHistoryDetail && (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0, y: 15 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 15 }}
+              className="bg-white rounded-3xl w-full max-w-4xl shadow-2xl relative overflow-hidden flex flex-col border border-stone-250 max-h-[92vh]"
+            >
+              {/* Modal Header */}
+              <div className="p-5 sm:p-6 bg-stone-900 text-white flex items-center justify-between gap-4 shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-700/80 text-white flex items-center justify-center shrink-0">
+                    <FileCheck size={22} />
+                  </div>
+                  <div>
+                    <div className="flex items-center flex-wrap gap-2">
+                      <span className="text-lg font-bold text-white font-sans tracking-tight">
+                        {selectedHistoryDetail.name || "응시자"} 님
+                      </span>
+                      <span className="text-xs text-stone-300 font-sans">
+                        | {selectedHistoryDetail.dept || "부서 미지정"}
+                      </span>
+                      <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full ${
+                        selectedHistoryDetail.round === 2 || selectedHistoryDetail.isReexam
+                          ? 'bg-indigo-500/30 text-indigo-200 border border-indigo-400/40'
+                          : 'bg-emerald-500/30 text-emerald-200 border border-emerald-400/40'
+                      }`}>
+                        {selectedHistoryDetail.round === 2 || selectedHistoryDetail.isReexam ? '2차 재시험' : '1차 정기평가'}
+                      </span>
+                      <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full ${
+                        selectedHistoryDetail.score >= passingScoreThreshold
+                          ? 'bg-emerald-500 text-white'
+                          : 'bg-red-500 text-white'
+                      }`}>
+                        {selectedHistoryDetail.score >= passingScoreThreshold ? '합격' : '불합격'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-stone-300 mt-1 font-sans flex items-center flex-wrap gap-3">
+                      <span>수험번호: <strong className="text-white font-mono">{selectedHistoryDetail.idNo || 'HS-기록없음'}</strong></span>
+                      <span>응시일: <strong className="text-white">{selectedHistoryDetail.date}</strong></span>
+                      <span>점수: <strong className="text-white font-mono text-sm">{selectedHistoryDetail.score}점</strong> ({Math.round(selectedHistoryDetail.score / 5)}/20문항 정답)</span>
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedHistoryDetail(null)}
+                  className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-stone-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                  title="닫기"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Modal Body: Scrollable */}
+              <div className="p-5 sm:p-6 overflow-y-auto space-y-6 flex-1 bg-stone-50/50">
+                {/* 1. OMR 답안지 한눈에 보기 카드 */}
+                <div className="bg-white rounded-2xl p-4 sm:p-5 border border-stone-200 shadow-xs">
+                  <div className="flex items-center justify-between mb-3 border-b border-stone-100 pb-2.5">
+                    <div className="flex items-center gap-2">
+                      <FileText size={16} className="text-emerald-800" />
+                      <h4 className="text-xs font-bold text-stone-900 uppercase tracking-wide">
+                        OMR 제출 답안 및 정오표 (20문항)
+                      </h4>
+                    </div>
+                    <div className="text-[11px] text-stone-500 font-sans flex items-center gap-3">
+                      <span className="flex items-center gap-1 text-emerald-700 font-bold">
+                        <Check size={13} className="stroke-[3px]" /> 정답: {Math.round(selectedHistoryDetail.score / 5)}개
+                      </span>
+                      <span className="flex items-center gap-1 text-red-600 font-bold">
+                        <X size={13} className="stroke-[3px]" /> 오답: {20 - Math.round(selectedHistoryDetail.score / 5)}개
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-10 gap-2">
+                    {haccpQuestions.map(q => {
+                      const userAns = selectedHistoryDetail.answers?.[q.id];
+                      const isCorrect = userAns === q.correctAnswer;
+                      const isUnanswered = userAns === undefined;
+
+                      return (
+                        <button
+                          key={q.id}
+                          type="button"
+                          onClick={() => {
+                            const elem = document.getElementById(`omr-modal-q-${q.id}`);
+                            if (elem) {
+                              elem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            }
+                          }}
+                          className={`p-2 rounded-xl border text-center transition-all cursor-pointer hover:scale-105 active:scale-95 ${
+                            isUnanswered
+                              ? 'bg-stone-100 border-stone-250 text-stone-500'
+                              : isCorrect
+                                ? 'bg-emerald-50/90 border-emerald-200 text-emerald-900 hover:bg-emerald-100'
+                                : 'bg-red-50/90 border-red-200 text-red-900 hover:bg-red-100'
+                          }`}
+                          title={`문항 ${q.id}번 확인하기 (클릭 시 이동)`}
+                        >
+                          <span className="text-[10px] font-mono font-bold block text-stone-500">Q{q.id}</span>
+                          <div className="flex items-center justify-center gap-1 my-1">
+                            <span className="text-xs font-bold font-mono">
+                              {userAns ? `${userAns}번` : '미응시'}
+                            </span>
+                            {isCorrect ? (
+                              <Check size={12} className="text-emerald-700 stroke-[3.5px]" />
+                            ) : (
+                              <X size={12} className="text-red-600 stroke-[3.5px]" />
+                            )}
+                          </div>
+                          {!isCorrect && (
+                            <span className="text-[9px] text-stone-400 block">정답:{q.correctAnswer}</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[11px] text-stone-400 text-right mt-2 font-sans">
+                    ※ 각 문항 박스를 클릭하면 아래 해당 문제의 상세 풀이 및 해설 위치로 즉시 이동합니다.
+                  </p>
+                </div>
+
+                {/* 2. 문항별 전체 상세 리스트 (질문, 4지선다, 마킹내역, 정답해설) */}
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between px-1">
+                    <h4 className="text-sm font-bold text-stone-900 flex items-center gap-2">
+                      <ListFilter size={16} className="text-stone-700" />
+                      전 문항 상세 확인 및 오답 분석
+                    </h4>
+                    <span className="text-xs text-stone-500 font-sans">
+                      총 20문항 (문항당 5점 배점)
+                    </span>
+                  </div>
+
+                  {haccpQuestions.map((q) => {
+                    const userAns = selectedHistoryDetail.answers?.[q.id];
+                    const isCorrect = userAns === q.correctAnswer;
+                    const isUnanswered = userAns === undefined;
+
+                    return (
+                      <div
+                        id={`omr-modal-q-${q.id}`}
+                        key={q.id}
+                        className={`bg-white rounded-2xl border p-5 sm:p-6 transition-all shadow-xs ${
+                          isCorrect 
+                            ? 'border-emerald-200' 
+                            : 'border-red-250 bg-red-50/10'
+                        }`}
+                      >
+                        {/* Question Header */}
+                        <div className="flex items-start justify-between gap-3 pb-3 border-b border-stone-100 mb-3">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-mono font-bold px-2.5 py-1 bg-stone-100 text-stone-800 rounded-lg border border-stone-200">
+                              문항 {q.id}
+                            </span>
+                            <span className="text-[11px] text-stone-400 font-sans">배점: 5점</span>
+                          </div>
+                          <div>
+                            {isUnanswered ? (
+                              <span className="px-2.5 py-1 rounded-full text-[11px] font-bold bg-stone-200 text-stone-700">
+                                미응답
+                              </span>
+                            ) : isCorrect ? (
+                              <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 shadow-2xs">
+                                <Check size={13} className="stroke-[3px]" />
+                                정답 (5점 획득)
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-[11px] font-bold bg-red-100 text-red-700 border border-red-200 shadow-2xs">
+                                <X size={13} className="stroke-[3px]" />
+                                오답 (0점 / 감점)
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Question Title & Context */}
+                        <div className="space-y-2 mb-4">
+                          <h5 className="text-sm sm:text-base font-bold text-stone-900 leading-snug font-sans">
+                            {q.id}. {q.text}
+                          </h5>
+                          {q.context && (
+                            <div className="p-3.5 bg-stone-50 border border-stone-200 rounded-xl text-xs text-stone-650 leading-relaxed font-sans whitespace-pre-line">
+                              {q.context}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Options List */}
+                        <div className="space-y-2 mb-4">
+                          {q.options.map((opt, optIdx) => {
+                            const optNum = optIdx + 1;
+                            const isSelected = userAns === optNum;
+                            const isRealAnswer = q.correctAnswer === optNum;
+
+                            return (
+                              <div
+                                key={optIdx}
+                                className={`p-3 rounded-xl border text-xs sm:text-sm flex items-start gap-3 transition-colors ${
+                                  isRealAnswer
+                                    ? 'bg-emerald-50/80 border-emerald-300 text-emerald-950 font-medium'
+                                    : isSelected
+                                      ? 'bg-red-50 border-red-300 text-red-900'
+                                      : 'bg-white border-stone-200 text-stone-700'
+                                }`}
+                              >
+                                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold shrink-0 mt-0.5 ${
+                                  isRealAnswer
+                                    ? 'bg-emerald-700 text-white'
+                                    : isSelected
+                                      ? 'bg-red-600 text-white'
+                                      : 'bg-stone-200 text-stone-700'
+                                }`}>
+                                  {optNum}
+                                </span>
+                                <span className="flex-1 leading-relaxed">{opt}</span>
+                                <div className="shrink-0 text-right">
+                                  {isRealAnswer && (
+                                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-md">
+                                      <Check size={12} className="stroke-[3px]" /> 실제 정답
+                                    </span>
+                                  )}
+                                  {isSelected && !isRealAnswer && (
+                                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-md">
+                                      <X size={12} className="stroke-[3px]" /> 수험자 선택(오답)
+                                    </span>
+                                  )}
+                                  {isSelected && isRealAnswer && (
+                                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-800 bg-emerald-200/80 px-2 py-0.5 rounded-md ml-1.5">
+                                      수험자 선택
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {/* Explanation Box */}
+                        <div className="bg-emerald-50/30 border border-emerald-200 rounded-xl p-3.5 space-y-1 text-xs">
+                          <div className="flex items-center gap-1.5 font-bold text-emerald-900 mb-1">
+                            <Info size={14} className="text-emerald-800" />
+                            <span>HACCP 기준 및 정답 해설</span>
+                          </div>
+                          <p className="text-stone-700 leading-relaxed font-sans">
+                            {q.explanation}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-4 bg-white border-t border-stone-200 flex items-center justify-between gap-4 shrink-0">
+                <div className="text-xs text-stone-500 font-sans hidden sm:block">
+                  ※ 인쇄가 필요하신 경우 상단 시험지 인쇄 기능을 활용하실 수 있습니다.
+                </div>
+                <div className="flex items-center gap-2 ml-auto">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedHistoryDetail(null)}
+                    className="px-5 py-2.5 bg-stone-900 hover:bg-stone-800 text-white text-xs font-bold rounded-xl transition-all shadow-xs cursor-pointer"
+                  >
+                    확인 및 닫기
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
         {/* 30-Minute Time Expired Modal (30분 시험 시간 종료 안내 모달) */}
         {showTimeExpiredModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs">
@@ -3905,44 +5098,72 @@ service cloud.firestore {
 
         {/* Exam Paper Print / Download Modal */}
         {showExamPaperModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs no-print">
+          <div className={`fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs no-print ${
+            isExamModalMaximized ? 'p-0.5 sm:p-1' : 'p-1 sm:p-3 md:p-4'
+          }`}>
             <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-white rounded-2xl border border-stone-200 shadow-2xl max-w-4xl w-full p-6 space-y-4 relative flex flex-col max-h-[92vh]"
+              className={`bg-white rounded-2xl border border-stone-200 shadow-2xl w-full relative flex flex-col transition-all ${
+                isExamModalMaximized 
+                  ? 'max-w-[99.5vw] h-[98.5vh] p-3 sm:p-5 space-y-2.5' 
+                  : 'max-w-[96vw] xl:max-w-7xl h-[95vh] p-4 sm:p-6 space-y-3.5'
+              }`}
             >
-              <button
-                type="button"
-                onClick={() => setShowExamPaperModal(false)}
-                className="absolute right-4 top-4 text-stone-400 hover:text-stone-600 p-1.5 hover:bg-stone-50 rounded-full transition-colors cursor-pointer"
-              >
-                <X size={18} />
-              </button>
+              {/* Top Header Buttons: Fullscreen & Close */}
+              <div className="absolute right-4 top-4 flex items-center gap-1.5 z-10">
+                <button
+                  type="button"
+                  onClick={() => setIsExamModalMaximized(prev => !prev)}
+                  className="text-stone-500 hover:text-stone-800 p-2 hover:bg-stone-100 rounded-lg transition-colors cursor-pointer flex items-center gap-1 text-xs font-semibold"
+                  title={isExamModalMaximized ? "원래 크기로 복원" : "미리보기 화면 최대화"}
+                >
+                  {isExamModalMaximized ? (
+                    <>
+                      <Minimize2 size={18} />
+                      <span className="hidden sm:inline">화면 축소</span>
+                    </>
+                  ) : (
+                    <>
+                      <Maximize2 size={18} />
+                      <span className="hidden sm:inline">화면 최대화</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowExamPaperModal(false)}
+                  className="text-stone-400 hover:text-stone-600 p-2 hover:bg-stone-100 rounded-full transition-colors cursor-pointer"
+                  title="닫기"
+                >
+                  <X size={20} />
+                </button>
+              </div>
 
-              <div className="flex items-center gap-3 border-b border-stone-150 pb-3">
-                <div className="w-10 h-10 bg-stone-900 text-white rounded-xl flex items-center justify-center shrink-0">
-                  <Printer size={20} />
+              <div className="flex items-center gap-3.5 border-b border-stone-150 pb-3 pr-28">
+                <div className="w-11 h-11 bg-stone-900 text-white rounded-xl flex items-center justify-center shrink-0 shadow-xs">
+                  <Printer size={22} />
                 </div>
                 <div>
-                  <h3 className="font-serif font-bold text-lg text-stone-900">
+                  <h3 className="font-serif font-bold text-xl text-stone-900 flex items-center gap-2">
                     연도별 HACCP 평가 시험지 출력 및 파일 저장
+                    <span className="text-xs font-sans font-bold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full">
+                      A4 양면 1장 표준 규격
+                    </span>
                   </h3>
-                  <p className="text-xs text-stone-500 font-sans mt-0.5">
-                    선택한 연도의 시험지를 인쇄(PDF 저장)하거나 Word/HWP, TXT 파일로 다운로드할 수 있습니다.
-                  </p>
                 </div>
               </div>
 
               {/* Controls bar inside modal */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-stone-50 p-3.5 rounded-xl border border-stone-200 text-xs">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-stone-50 p-3 rounded-xl border border-stone-200 text-xs">
                 {/* Year Select */}
                 <div className="flex items-center gap-2">
                   <label className="font-bold text-stone-700 shrink-0">출력 연도 선택:</label>
                   <select
                     value={examPaperYear}
                     onChange={e => setExamPaperYear(e.target.value)}
-                    className="flex-1 px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-bold text-emerald-900 focus:ring-2 focus:ring-emerald-800 focus:outline-hidden cursor-pointer"
+                    className="flex-1 px-3 py-2 bg-white border border-stone-300 rounded-lg font-bold text-emerald-900 focus:ring-2 focus:ring-emerald-800 focus:outline-hidden cursor-pointer text-xs sm:text-sm"
                   >
                     {[2026].map(y => (
                       <option key={y} value={y.toString()}>{y}년도 평가 시험지 (온라인 정식 시행)</option>
@@ -3957,9 +5178,9 @@ service cloud.firestore {
                     <button
                       type="button"
                       onClick={() => setExamPaperType('student')}
-                      className={`flex-1 py-1.5 px-2 rounded-lg font-medium text-xs transition-all cursor-pointer border ${
+                      className={`flex-1 py-2 px-3 rounded-lg font-medium text-xs transition-all cursor-pointer border ${
                         examPaperType === 'student'
-                          ? 'bg-stone-900 text-white border-stone-900 font-bold'
+                          ? 'bg-stone-900 text-white border-stone-900 font-bold shadow-2xs'
                           : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-100'
                       }`}
                     >
@@ -3968,9 +5189,9 @@ service cloud.firestore {
                     <button
                       type="button"
                       onClick={() => setExamPaperType('teacher')}
-                      className={`flex-1 py-1.5 px-2 rounded-lg font-medium text-xs transition-all cursor-pointer border ${
+                      className={`flex-1 py-2 px-3 rounded-lg font-medium text-xs transition-all cursor-pointer border ${
                         examPaperType === 'teacher'
-                          ? 'bg-emerald-800 text-white border-emerald-800 font-bold'
+                          ? 'bg-emerald-800 text-white border-emerald-800 font-bold shadow-2xs'
                           : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-100'
                       }`}
                     >
@@ -3980,90 +5201,484 @@ service cloud.firestore {
                 </div>
               </div>
 
-              {/* Action Buttons Toolbar */}
-              <div className="flex flex-wrap items-center justify-between gap-2.5 bg-emerald-50/60 p-3 rounded-xl border border-emerald-100">
-                <span className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
-                  <Sparkles size={15} className="text-emerald-700" />
-                  내보내기 옵션 선택:
-                </span>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => window.print()}
-                    className="px-3.5 py-2 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Printer size={14} />
-                    인쇄 및 PDF 저장
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleDownloadExamDoc}
-                    className="px-3.5 py-2 bg-stone-800 hover:bg-stone-900 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Download size={14} />
-                    Word/HWP 저장 (.doc)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleDownloadExamTxt}
-                    className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 text-xs font-semibold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <FileText size={14} />
-                    TXT 저장 (.txt)
-                  </button>
-                </div>
-              </div>
+              {/* Action Buttons Toolbar & Zoom Controls */}
+              <div className="flex flex-col gap-2.5 bg-emerald-50/70 p-3 rounded-xl border border-emerald-200">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  {/* Preview Tabs & Zoom Controls */}
+                  <div className="flex flex-wrap items-center gap-2 w-full justify-between">
+                    <div className="flex items-center gap-1 bg-white/90 p-1 rounded-lg border border-emerald-200 text-xs">
+                      <span className="text-[11px] font-bold text-stone-600 px-1">면 선택:</span>
+                      <button
+                        type="button"
+                        onClick={() => setExamPreviewTab('both')}
+                        className={`px-2.5 py-1 rounded text-xs font-bold transition-all cursor-pointer ${
+                          examPreviewTab === 'both' ? 'bg-emerald-800 text-white shadow-2xs' : 'text-stone-600 hover:bg-stone-100'
+                        }`}
+                      >
+                        전체보기
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setExamPreviewTab('page1')}
+                        className={`px-2.5 py-1 rounded text-xs font-bold transition-all cursor-pointer ${
+                          examPreviewTab === 'page1' ? 'bg-emerald-800 text-white shadow-2xs' : 'text-stone-600 hover:bg-stone-100'
+                        }`}
+                      >
+                        앞면 (1~10번)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setExamPreviewTab('page2')}
+                        className={`px-2.5 py-1 rounded text-xs font-bold transition-all cursor-pointer ${
+                          examPreviewTab === 'page2' ? 'bg-emerald-800 text-white shadow-2xs' : 'text-stone-600 hover:bg-stone-100'
+                        }`}
+                      >
+                        뒷면 (11~20번)
+                      </button>
+                    </div>
 
-              {/* Live Preview Paper */}
-              <div className="flex-1 overflow-y-auto bg-stone-50/70 rounded-xl p-6 border border-stone-250 font-serif text-stone-900 text-xs space-y-6 max-h-[48vh]">
-                <div className="text-center pb-4 border-b border-stone-300 space-y-1">
-                  <KooksoondangLogo className="scale-90 mb-1" />
-                  <h2 className="text-xl font-bold text-stone-900 mt-2">
-                    {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지
-                  </h2>
-                  <p className="text-[11px] text-stone-600 font-sans font-medium">
-                    주관 부서: 품질보증팀 &nbsp;|&nbsp; {examPaperType === 'student' ? '[ 수험생 응시용 문제지 ]' : '[ 관리자용 정답 및 해설지 ]'}
-                  </p>
-                </div>
+                    <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1 bg-white/90 p-1 rounded-lg border border-stone-200 text-xs">
+                        <span className="text-[11px] font-bold text-stone-600 px-1 flex items-center gap-1">
+                          <ZoomIn size={12} />
+                          글자 크기:
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setExamPreviewZoom('normal')}
+                          className={`px-2.5 py-1 rounded text-xs font-bold transition-all cursor-pointer ${
+                            examPreviewZoom === 'normal' ? 'bg-stone-800 text-white' : 'text-stone-600 hover:bg-stone-100'
+                          }`}
+                        >
+                          보통
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setExamPreviewZoom('large')}
+                          className={`px-2.5 py-1 rounded text-xs font-bold transition-all cursor-pointer ${
+                            examPreviewZoom === 'large' ? 'bg-stone-800 text-white' : 'text-stone-600 hover:bg-stone-100'
+                          }`}
+                        >
+                          크게
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setExamPreviewZoom('xlarge')}
+                          className={`px-2.5 py-1 rounded text-xs font-bold transition-all cursor-pointer ${
+                            examPreviewZoom === 'xlarge' ? 'bg-stone-800 text-white' : 'text-stone-600 hover:bg-stone-100'
+                          }`}
+                        >
+                          아주 크게
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setExamPreviewZoom('xxlarge')}
+                          className={`px-2.5 py-1 rounded text-xs font-bold transition-all cursor-pointer ${
+                            examPreviewZoom === 'xxlarge' ? 'bg-stone-800 text-white' : 'text-stone-600 hover:bg-stone-100'
+                          }`}
+                        >
+                          최대 크기
+                        </button>
+                      </div>
 
-                {/* Score & Examinee Box */}
-                <div className="bg-white p-3 border border-stone-300 rounded-lg shadow-2xs font-sans text-xs">
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-center">
-                    <div className="p-1.5 bg-stone-50 rounded">소속: <span className="font-bold">_______________</span></div>
-                    <div className="p-1.5 bg-stone-50 rounded">성명: <span className="font-bold">_______________</span></div>
-                    <div className="p-1.5 bg-stone-50 rounded">일자: <span className="font-bold">{examPaperYear}년 ___월 ___일</span></div>
-                    <div className="p-1.5 bg-stone-50 rounded font-bold text-emerald-800">점수: ____ / 100점</div>
+                      {/* 팝업 새 창으로 크게 보기 버튼 */}
+                      <button
+                        type="button"
+                        onClick={() => handleOpenExamPaperWindow(false)}
+                        className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                        title="새 팝업 브라우저 창에서 넓은 전체 화면으로 보기"
+                      >
+                        <ExternalLink size={13} />
+                        <span>팝업 새 창으로 크게보기</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setIsExamModalMaximized(prev => !prev)}
+                        className="px-3 py-1.5 bg-white hover:bg-stone-100 text-stone-700 border border-stone-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                      >
+                        {isExamModalMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                        <span>{isExamModalMaximized ? '기본창' : '미리보기 창 전체확대'}</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
 
-                {/* Questions Preview */}
-                <div className="space-y-5">
-                  {haccpQuestions.map((q, idx) => (
-                    <div key={q.id} className="bg-white p-4 rounded-xl border border-stone-200 shadow-2xs space-y-2">
-                      <p className="font-bold text-stone-900 text-sm">
-                        {idx + 1}. {q.text}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-emerald-100">
+                  <span className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
+                    내보내기 실행:
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handlePrintExamPaper}
+                      className="px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white text-xs sm:text-sm font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer active:scale-95"
+                      title="양면 인쇄로 A4 1장 출력"
+                    >
+                      <Printer size={16} />
+                      시험지 인쇄 (양면 1장)
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isGeneratingPdf}
+                      onClick={handleDownloadExamPdf}
+                      className="px-4 py-2 bg-indigo-700 hover:bg-indigo-800 text-white text-xs sm:text-sm font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer active:scale-95 disabled:opacity-50"
+                      title="A4 양면 1장 규격 PDF 파일 다운로드"
+                    >
+                      {isGeneratingPdf ? (
+                        <>
+                          <Loader2 size={16} className="animate-spin" />
+                          PDF 생성 중...
+                        </>
+                      ) : (
+                        <>
+                          <Download size={16} />
+                          PDF 저장
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDownloadExamDoc}
+                      className="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs sm:text-sm font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer active:scale-95"
+                      title="Word에서 열어 양면 인쇄 시 1장으로 출력 (2페이지 완벽 규격)"
+                    >
+                      <Download size={16} />
+                      Word 저장 (.doc)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDownloadExamTxt}
+                      className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 text-xs font-semibold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer active:scale-95"
+                    >
+                      <FileText size={16} />
+                      TXT 저장 (.txt)
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Live Preview Paper - 2 Column Double-Sided Layout */}
+              <div 
+                style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}
+                className={`flex-1 overflow-y-auto bg-stone-200/70 rounded-xl p-3 sm:p-5 md:p-6 border border-stone-300 text-stone-900 space-y-6 ${
+                  isExamModalMaximized ? 'max-h-[82vh]' : 'max-h-[72vh]'
+                }`}
+              >
+                {/* PAGE 1: 앞면 (1~10번) */}
+                {(examPreviewTab === 'both' || examPreviewTab === 'page1') && (
+                  <div className={`bg-white rounded-xl border border-stone-300 shadow-md space-y-5 mx-auto transition-all ${
+                    examPreviewZoom === 'xxlarge' 
+                      ? 'w-full max-w-7xl p-8 sm:p-10 md:p-12' 
+                      : examPreviewZoom === 'xlarge' 
+                        ? 'w-full max-w-6xl p-7 sm:p-9 md:p-11' 
+                        : examPreviewZoom === 'large'
+                          ? 'w-full max-w-5xl p-6 sm:p-8 md:p-10'
+                          : 'w-full max-w-5xl p-6 sm:p-8 md:p-10'
+                  }`}>
+                    <div className="flex items-center justify-between border-b border-stone-200 pb-2.5 text-xs text-stone-500 font-sans">
+                      <span className="font-bold text-stone-700 text-xs sm:text-sm">KOOKSOONDANG | 주식회사 국순당 횡성양조장</span>
+                      <span className="px-2.5 py-1 bg-emerald-100 text-emerald-900 font-bold rounded-md text-xs sm:text-sm">
+                        [ 제 1 면 - 앞면 (1번 ~ 10번) ]
+                      </span>
+                    </div>
+
+                    <div className="text-center space-y-1.5">
+                      <h2 className={`font-bold text-stone-900 tracking-tight ${
+                        examPreviewZoom === 'xxlarge' ? 'text-2xl sm:text-3xl' : examPreviewZoom === 'xlarge' ? 'text-xl sm:text-2xl' : 'text-lg sm:text-xl'
+                      }`}>
+                        {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지
+                      </h2>
+                      <p className="text-xs sm:text-sm text-stone-600 font-sans font-medium">
+                        주관 부서: 품질보증팀 &nbsp;|&nbsp; {examPaperType === 'student' ? '[ 수험생 응시용 문제지 ]' : '[ 관리자용 정답 및 해설지 ]'}
                       </p>
-                      <div className="pl-3 space-y-1 text-stone-700 font-sans text-xs">
-                        {q.options.map((opt, oIdx) => (
-                          <div key={oIdx} className="flex items-start gap-1.5">
-                            <span className="font-semibold">{oIdx + 1})</span>
-                            <span className={examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 ? 'font-bold text-emerald-800 bg-emerald-50 px-1 rounded' : ''}>
-                              {opt}
-                              {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
-                                <span className="text-emerald-700 font-bold ml-1">[★ 정답]</span>
-                              )}
-                            </span>
+                    </div>
+
+                    {/* Header Table */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse border border-stone-800 text-center font-sans text-xs sm:text-sm">
+                        <tbody>
+                          <tr>
+                            <th className="border border-stone-800 bg-stone-100 p-2 font-bold" width="12%">소 속</th>
+                            <td className="border border-stone-800 p-2" width="24%"></td>
+                            <th className="border border-stone-800 bg-stone-100 p-2 font-bold" width="12%">성 명</th>
+                            <td className="border border-stone-800 p-2" width="24%"></td>
+                            <th className="border border-stone-800 bg-stone-100 p-2 font-bold" width="14%">결 재</th>
+                            <td className="border border-stone-800 p-2 text-xs" width="14%">담당 / 팀장</td>
+                          </tr>
+                          <tr>
+                            <th className="border border-stone-800 bg-stone-100 p-2 font-bold">평가 일자</th>
+                            <td className="border border-stone-800 p-2">{examPaperYear}년 &nbsp;&nbsp;&nbsp;월 &nbsp;&nbsp;&nbsp;일</td>
+                            <th className="border border-stone-800 bg-stone-100 p-2 font-bold">평가 점수</th>
+                            <td className="border border-stone-800 p-2 font-bold text-emerald-900">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 점 / 100점</td>
+                            <th className="border border-stone-800 bg-stone-100 p-2 font-bold">판 정</th>
+                            <td className="border border-stone-800 p-2 font-bold text-xs sm:text-sm">[ 합격 / 재평가 ]</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Notice */}
+                    <div className="p-3 bg-stone-50 border border-stone-300 rounded-lg text-xs sm:text-sm font-sans text-stone-700 leading-normal">
+                      <b>[평가 안내사항]</b> ① 총 20문항(문항당 5점 배점)이며 70점 이상 취득 시 합격입니다. ② 각 문항을 읽고 가장 알맞은 번호(①~⑤)를 선택하십시오.
+                    </div>
+
+                    {/* 2-Column Grid for Questions 1 ~ 10 */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
+                      {/* Left Column: 1 ~ 5 */}
+                      <div className="space-y-5 md:pr-4 md:border-r md:border-stone-200">
+                        {haccpQuestions.slice(0, 5).map((q, idx) => (
+                          <div key={q.id} className="space-y-2">
+                            <p className={`font-bold text-stone-900 leading-snug ${
+                              examPreviewZoom === 'xxlarge' 
+                                ? 'text-lg sm:text-xl' 
+                                : examPreviewZoom === 'xlarge' 
+                                  ? 'text-base sm:text-lg' 
+                                  : examPreviewZoom === 'large' 
+                                    ? 'text-sm sm:text-base' 
+                                    : 'text-xs sm:text-sm'
+                            }`}>
+                              <span className="text-emerald-950 mr-1.5 font-extrabold">{idx + 1}.</span> {q.text}
+                            </p>
+                            {q.context && (
+                              <div className={`bg-stone-50 border border-stone-250 p-2 text-stone-600 rounded-md font-sans ${
+                                examPreviewZoom === 'xxlarge' || examPreviewZoom === 'xlarge' ? 'text-sm' : 'text-xs'
+                              }`}>
+                                {q.context}
+                              </div>
+                            )}
+                            <div className={`pl-2 space-y-1.5 text-stone-800 font-sans ${
+                              examPreviewZoom === 'xxlarge' 
+                                ? 'text-base sm:text-lg' 
+                                : examPreviewZoom === 'xlarge' 
+                                  ? 'text-sm sm:text-base' 
+                                  : examPreviewZoom === 'large' 
+                                    ? 'text-xs sm:text-sm' 
+                                    : 'text-xs'
+                            }`}>
+                              {q.options.map((opt, oIdx) => (
+                                <div key={oIdx} className="flex items-start gap-1.5">
+                                  <span className="font-bold text-stone-900 shrink-0">{['①', '②', '③', '④', '⑤'][oIdx]}</span>
+                                  <span className={examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 ? 'font-bold text-emerald-800 bg-emerald-50 px-1.5 py-0.5 rounded' : ''}>
+                                    {opt}
+                                    {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
+                                      <span className="text-emerald-700 font-bold ml-1.5">[★ 정답]</span>
+                                    )}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                            {examPaperType === 'teacher' && (
+                              <div className="mt-2 p-2.5 bg-emerald-50 border border-emerald-300 rounded-lg text-xs sm:text-sm font-sans text-emerald-900 leading-relaxed">
+                                <span className="font-bold">[정답: {q.correctAnswer}번]</span> {q.explanation}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
-                      {examPaperType === 'teacher' && (
-                        <div className="mt-2 p-2.5 bg-emerald-50/80 border border-emerald-200 rounded-lg text-xs font-sans text-emerald-900 leading-relaxed">
-                          <span className="font-bold">[정답: {q.correctAnswer}번]</span> {q.explanation}
-                        </div>
-                      )}
+
+                      {/* Right Column: 6 ~ 10 */}
+                      <div className="space-y-5 md:pl-4">
+                        {haccpQuestions.slice(5, 10).map((q, idx) => (
+                          <div key={q.id} className="space-y-2">
+                            <p className={`font-bold text-stone-900 leading-snug ${
+                              examPreviewZoom === 'xxlarge' 
+                                ? 'text-lg sm:text-xl' 
+                                : examPreviewZoom === 'xlarge' 
+                                  ? 'text-base sm:text-lg' 
+                                  : examPreviewZoom === 'large' 
+                                    ? 'text-sm sm:text-base' 
+                                    : 'text-xs sm:text-sm'
+                            }`}>
+                              <span className="text-emerald-950 mr-1.5 font-extrabold">{idx + 6}.</span> {q.text}
+                            </p>
+                            {q.context && (
+                              <div className={`bg-stone-50 border border-stone-250 p-2 text-stone-600 rounded-md font-sans ${
+                                examPreviewZoom === 'xxlarge' || examPreviewZoom === 'xlarge' ? 'text-sm' : 'text-xs'
+                              }`}>
+                                {q.context}
+                              </div>
+                            )}
+                            <div className={`pl-2 space-y-1.5 text-stone-800 font-sans ${
+                              examPreviewZoom === 'xxlarge' 
+                                ? 'text-base sm:text-lg' 
+                                : examPreviewZoom === 'xlarge' 
+                                  ? 'text-sm sm:text-base' 
+                                  : examPreviewZoom === 'large' 
+                                    ? 'text-xs sm:text-sm' 
+                                    : 'text-xs'
+                            }`}>
+                              {q.options.map((opt, oIdx) => (
+                                <div key={oIdx} className="flex items-start gap-1.5">
+                                  <span className="font-bold text-stone-900 shrink-0">{['①', '②', '③', '④', '⑤'][oIdx]}</span>
+                                  <span className={examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 ? 'font-bold text-emerald-800 bg-emerald-50 px-1.5 py-0.5 rounded' : ''}>
+                                    {opt}
+                                    {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
+                                      <span className="text-emerald-700 font-bold ml-1.5">[★ 정답]</span>
+                                    )}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                            {examPaperType === 'teacher' && (
+                              <div className="mt-2 p-2.5 bg-emerald-50 border border-emerald-300 rounded-lg text-xs sm:text-sm font-sans text-emerald-900 leading-relaxed">
+                                <span className="font-bold">[정답: {q.correctAnswer}번]</span> {q.explanation}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  ))}
-                </div>
+
+                    <div className="text-center pt-4 border-t border-stone-200 text-xs sm:text-sm text-stone-600 font-sans font-bold">
+                      - 1 / 2 면 [ 다음 면(뒷면) 11~20번에 계속 ] -
+                    </div>
+                  </div>
+                )}
+
+                {/* PAGE 2: 뒷면 (11~20번) */}
+                {(examPreviewTab === 'both' || examPreviewTab === 'page2') && (
+                  <div className={`bg-white rounded-xl border border-stone-300 shadow-md space-y-5 mx-auto transition-all ${
+                    examPreviewZoom === 'xxlarge' 
+                      ? 'w-full max-w-7xl p-8 sm:p-10 md:p-12' 
+                      : examPreviewZoom === 'xlarge' 
+                        ? 'w-full max-w-6xl p-7 sm:p-9 md:p-11' 
+                        : examPreviewZoom === 'large'
+                          ? 'w-full max-w-5xl p-6 sm:p-8 md:p-10'
+                          : 'w-full max-w-5xl p-6 sm:p-8 md:p-10'
+                  }`}>
+                    <div className="flex items-center justify-between border-b border-stone-200 pb-2.5 text-xs text-stone-500 font-sans">
+                      <span className="font-bold text-stone-700 text-xs sm:text-sm">KOOKSOONDANG | 주식회사 국순당 횡성양조장</span>
+                      <span className="px-2.5 py-1 bg-indigo-100 text-indigo-900 font-bold rounded-md text-xs sm:text-sm">
+                        [ 제 2 면 - 뒷면 (11번 ~ 20번) ]
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between border-b border-stone-800 pb-2 text-xs sm:text-sm font-sans">
+                      <span className="font-bold text-stone-900">
+                        {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지 (제 2 면 - 뒷면)
+                      </span>
+                      <span className="text-stone-600 font-medium">성명: ____________ &nbsp;&nbsp; 소속: ____________</span>
+                    </div>
+
+                    {/* 2-Column Grid for Questions 11 ~ 20 */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
+                      {/* Left Column: 11 ~ 15 */}
+                      <div className="space-y-5 md:pr-4 md:border-r md:border-stone-200">
+                        {haccpQuestions.slice(10, 15).map((q, idx) => (
+                          <div key={q.id} className="space-y-2">
+                            <p className={`font-bold text-stone-900 leading-snug ${
+                              examPreviewZoom === 'xxlarge' 
+                                ? 'text-lg sm:text-xl' 
+                                : examPreviewZoom === 'xlarge' 
+                                  ? 'text-base sm:text-lg' 
+                                  : examPreviewZoom === 'large' 
+                                    ? 'text-sm sm:text-base' 
+                                    : 'text-xs sm:text-sm'
+                            }`}>
+                              <span className="text-emerald-950 mr-1.5 font-extrabold">{idx + 11}.</span> {q.text}
+                            </p>
+                            {q.context && (
+                              <div className={`bg-stone-50 border border-stone-250 p-2 text-stone-600 rounded-md font-sans ${
+                                examPreviewZoom === 'xxlarge' || examPreviewZoom === 'xlarge' ? 'text-sm' : 'text-xs'
+                              }`}>
+                                {q.context}
+                              </div>
+                            )}
+                            <div className={`pl-2 space-y-1.5 text-stone-800 font-sans ${
+                              examPreviewZoom === 'xxlarge' 
+                                ? 'text-base sm:text-lg' 
+                                : examPreviewZoom === 'xlarge' 
+                                  ? 'text-sm sm:text-base' 
+                                  : examPreviewZoom === 'large' 
+                                    ? 'text-xs sm:text-sm' 
+                                    : 'text-xs'
+                            }`}>
+                              {q.options.map((opt, oIdx) => (
+                                <div key={oIdx} className="flex items-start gap-1.5">
+                                  <span className="font-bold text-stone-900 shrink-0">{['①', '②', '③', '④', '⑤'][oIdx]}</span>
+                                  <span className={examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 ? 'font-bold text-emerald-800 bg-emerald-50 px-1.5 py-0.5 rounded' : ''}>
+                                    {opt}
+                                    {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
+                                      <span className="text-emerald-700 font-bold ml-1.5">[★ 정답]</span>
+                                    )}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                            {examPaperType === 'teacher' && (
+                              <div className="mt-2 p-2.5 bg-emerald-50 border border-emerald-300 rounded-lg text-xs sm:text-sm font-sans text-emerald-900 leading-relaxed">
+                                <span className="font-bold">[정답: {q.correctAnswer}번]</span> {q.explanation}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Right Column: 16 ~ 20 */}
+                      <div className="space-y-5 md:pl-4">
+                        {haccpQuestions.slice(15, 20).map((q, idx) => (
+                          <div key={q.id} className="space-y-2">
+                            <p className={`font-bold text-stone-900 leading-snug ${
+                              examPreviewZoom === 'xxlarge' 
+                                ? 'text-lg sm:text-xl' 
+                                : examPreviewZoom === 'xlarge' 
+                                  ? 'text-base sm:text-lg' 
+                                  : examPreviewZoom === 'large' 
+                                    ? 'text-sm sm:text-base' 
+                                    : 'text-xs sm:text-sm'
+                            }`}>
+                              <span className="text-emerald-950 mr-1.5 font-extrabold">{idx + 16}.</span> {q.text}
+                            </p>
+                            {q.context && (
+                              <div className={`bg-stone-50 border border-stone-250 p-2 text-stone-600 rounded-md font-sans ${
+                                examPreviewZoom === 'xxlarge' || examPreviewZoom === 'xlarge' ? 'text-sm' : 'text-xs'
+                              }`}>
+                                {q.context}
+                              </div>
+                            )}
+                            <div className={`pl-2 space-y-1.5 text-stone-800 font-sans ${
+                              examPreviewZoom === 'xxlarge' 
+                                ? 'text-base sm:text-lg' 
+                                : examPreviewZoom === 'xlarge' 
+                                  ? 'text-sm sm:text-base' 
+                                  : examPreviewZoom === 'large' 
+                                    ? 'text-xs sm:text-sm' 
+                                    : 'text-xs'
+                            }`}>
+                              {q.options.map((opt, oIdx) => (
+                                <div key={oIdx} className="flex items-start gap-1.5">
+                                  <span className="font-bold text-stone-900 shrink-0">{['①', '②', '③', '④', '⑤'][oIdx]}</span>
+                                  <span className={examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 ? 'font-bold text-emerald-800 bg-emerald-50 px-1.5 py-0.5 rounded' : ''}>
+                                    {opt}
+                                    {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
+                                      <span className="text-emerald-700 font-bold ml-1.5">[★ 정답]</span>
+                                    )}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                            {examPaperType === 'teacher' && (
+                              <div className="mt-2 p-2.5 bg-emerald-50 border border-emerald-300 rounded-lg text-xs sm:text-sm font-sans text-emerald-900 leading-relaxed">
+                                <span className="font-bold">[정답: {q.correctAnswer}번]</span> {q.explanation}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="p-3 bg-stone-50 border border-stone-300 rounded-lg text-center text-xs sm:text-sm font-sans text-stone-700">
+                      <b>[ - 이하 여백 - ]</b> 문제 풀이를 완료하신 후 기재사항 및 누락된 문항이 없는지 다시 점검하십시오. 수고하셨습니다.
+                    </div>
+
+                    <div className="flex justify-between items-center pt-4 border-t border-stone-200 text-xs text-stone-400 font-sans">
+                      <span>주식회사 국순당 품질보증팀</span>
+                      <span>- 2 / 2 면 (끝) -</span>
+                      <span>HACCP 관리인증</span>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Close Footer */}
@@ -4071,7 +5686,7 @@ service cloud.firestore {
                 <button
                   type="button"
                   onClick={() => setShowExamPaperModal(false)}
-                  className="px-5 py-2.5 bg-stone-900 hover:bg-stone-850 text-white text-xs font-bold rounded-xl transition-all cursor-pointer"
+                  className="px-6 py-2.5 bg-stone-900 hover:bg-stone-850 text-white text-xs sm:text-sm font-bold rounded-xl transition-all cursor-pointer shadow-xs"
                 >
                   닫기
                 </button>
@@ -4183,68 +5798,216 @@ service cloud.firestore {
         )}
       </AnimatePresence>
 
-      {/* ----------------- PRINT ONLY EXAM PAPER CONTAINER FOR WINDOW.PRINT() ----------------- */}
-      <div className="print-only font-serif p-8 bg-white text-stone-900">
-        <div className="text-center mb-6">
-          <div className="text-xs font-bold tracking-widest text-stone-500 mb-1">KOOKSOONDANG | 주식회사 국순당</div>
-          <h1 className="text-2xl font-bold text-stone-900">{examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지</h1>
-          <p className="text-xs text-stone-500 font-sans mt-1">
-            {examPaperType === 'student' ? '[ 수험생 응시용 문제지 ]' : '[ 관리자용 정답 및 해설지 ]'}
-          </p>
-        </div>
+      {/* ----------------- PRINT ONLY EXAM PAPER CONTAINER FOR WINDOW.PRINT() (A4 양면 1장) ----------------- */}
+      <div className="print-only bg-white text-stone-900" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
+        {/* PAGE 1 (앞면: 1번~10번 2단 다단) */}
+        <div className="print-page flex flex-col justify-between" style={{ boxSizing: 'border-box', pageBreakAfter: 'always', breakAfter: 'page', padding: '4mm 6mm 3mm 6mm', fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
+          <div>
+            <div className="text-center mb-0.5 text-[9.5px] font-bold tracking-widest text-stone-600">
+              KOOKSOONDANG | 주식회사 국순당 횡성양조장
+            </div>
+            <h1 className="text-center text-[15px] font-bold text-stone-900 mb-0.5" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+              {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지
+            </h1>
+            <p className="text-center text-[9.5px] text-stone-600 font-bold mb-1">
+              주관 부서: 품질보증팀 &nbsp;|&nbsp; {examPaperType === 'student' ? '[ 수험생 응시용 문제지 (제 1 면 - 앞면: 1~10번) ]' : '[ 관리자용 정답 및 해설지 (제 1 면 - 앞면: 1~10번) ]'}
+            </p>
 
-        <table className="w-full border-collapse border border-stone-900 text-center text-xs mb-6">
-          <tbody>
-            <tr>
-              <th className="border border-stone-900 bg-stone-100 p-2 font-bold" width="15%">소 속</th>
-              <td className="border border-stone-900 p-2" width="25%"></td>
-              <th className="border border-stone-900 bg-stone-100 p-2 font-bold" width="15%">성 명</th>
-              <td className="border border-stone-900 p-2" width="25%"></td>
-              <th className="border border-stone-900 bg-stone-100 p-2 font-bold" width="10%">결 재</th>
-              <td className="border border-stone-900 p-2 text-[10px]" width="10%">담당 / 팀장</td>
-            </tr>
-            <tr>
-              <th className="border border-stone-900 bg-stone-100 p-2 font-bold">평가 일자</th>
-              <td className="border border-stone-900 p-2">{examPaperYear}년 ___월 ___일</td>
-              <th className="border border-stone-900 bg-stone-100 p-2 font-bold">평가 점수</th>
-              <td className="border border-stone-900 p-2 font-mono">_____ 점 / 100점</td>
-              <th className="border border-stone-900 bg-stone-100 p-2 font-bold">판 정</th>
-              <td className="border border-stone-900 p-2 font-bold">[합격 / 재평가 / 재교육+재평가]</td>
-            </tr>
-          </tbody>
-        </table>
+            <table className="w-full border-collapse border border-stone-900 text-center text-[9.5px] mb-1" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+              <tbody>
+                <tr>
+                  <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold" width="12%">소 속</th>
+                  <td className="border border-stone-900 p-0.5" width="24%"></td>
+                  <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold" width="12%">성 명</th>
+                  <td className="border border-stone-900 p-0.5" width="24%"></td>
+                  <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold" width="14%">결 재</th>
+                  <td className="border border-stone-900 p-0.5 text-[8.5px]" width="14%">담당 / 팀장</td>
+                </tr>
+                <tr>
+                  <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold">평가 일자</th>
+                  <td className="border border-stone-900 p-0.5">{examPaperYear}년 &nbsp;&nbsp;&nbsp;월 &nbsp;&nbsp;&nbsp;일</td>
+                  <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold">평가 점수</th>
+                  <td className="border border-stone-900 p-0.5 font-bold">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 점 / 100점</td>
+                  <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold">판 정</th>
+                  <td className="border border-stone-900 p-0.5 font-bold text-[9.5px]">[ 합격 &nbsp;/&nbsp; 재평가 ]</td>
+                </tr>
+              </tbody>
+            </table>
 
-        <div className="border border-stone-400 bg-stone-50 p-3.5 mb-6 text-xs leading-relaxed">
-          <p className="font-bold mb-1">[평가 안내사항]</p>
-          <p>1. 본 시험은 {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 이수자를 대상으로 실시하는 내부 평가입니다.</p>
-          <p>2. 총 20문항이며, 각 문항당 배점은 5점입니다. (70점 이상 합격, 70점 미만 재평가, 50점 미만 재교육+재평가)</p>
-          <p>3. 각 문항을 읽고 가장 알맞은 답의 번호를 하나 골라 표시하시오.</p>
-        </div>
+            <div className="border border-stone-400 bg-stone-50 px-2 py-0.5 mb-1.5 text-[9px] leading-snug" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+              <b>[평가 안내사항]</b> ① 총 20문항(문항당 5점 배점)이며 70점 이상 합격입니다. ② 첫번째 장(앞면): 1~10번 / 두번째 장(뒷면): 11~20번입니다.
+            </div>
 
-        <div className="space-y-5 text-sm">
-          {haccpQuestions.map((q, idx) => (
-            <div key={q.id} className="page-break-avoid">
-              <p className="font-bold text-stone-900 mb-1.5">{idx + 1}. {q.text}</p>
-              <div className="pl-4 space-y-1 text-xs text-stone-800">
-                {q.options.map((opt, oIdx) => (
-                  <div key={oIdx} className="flex items-start gap-1">
-                    <span className="font-medium">{oIdx + 1})</span>
-                    <span>
-                      {opt}
-                      {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
-                        <span className="font-bold text-emerald-800 ml-1.5">[★ 정답]</span>
-                      )}
-                    </span>
+            {/* 2-Column Grid */}
+            <div className="grid grid-cols-2 gap-x-5 relative text-[9.5px]" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+              <div className="absolute left-1/2 top-0 bottom-0 w-[1px] bg-stone-300 -translate-x-1/2" />
+              {/* Col 1: 1~5 */}
+              <div className="pr-2 space-y-3">
+                {haccpQuestions.slice(0, 5).map((q, idx) => (
+                  <div key={q.id} className="pb-1" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                    <p className="font-bold text-stone-900 leading-snug mb-0.5">
+                      <span className="font-bold mr-0.5">{idx + 1}.</span> {q.text}
+                    </p>
+                    {q.context && (
+                      <div className="bg-stone-50 border border-stone-200 px-1.5 py-0.5 mb-0.5 text-[8.5px] text-stone-600">
+                        {q.context}
+                      </div>
+                    )}
+                    <div className="pl-1 text-stone-800 leading-tight space-y-0.5">
+                      {q.options.map((opt, oIdx) => (
+                        <div key={oIdx} className="flex items-start gap-1">
+                          <span className="font-bold text-stone-900 shrink-0">{['①', '②', '③', '④', '⑤'][oIdx]}</span>
+                          <span>
+                            {opt}
+                            {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
+                              <span className="text-emerald-800 font-bold ml-1">[★ 정답]</span>
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {examPaperType === 'teacher' && (
+                      <div className="mt-1 p-1 bg-emerald-50 border border-emerald-300 rounded text-[8.5px] text-emerald-900">
+                        <b>[정답: {q.correctAnswer}번]</b> {q.explanation}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
-              {examPaperType === 'teacher' && (
-                <div className="mt-1.5 p-2 bg-emerald-50 border border-emerald-200 rounded text-xs text-emerald-900">
-                  <span className="font-bold">[정답: {q.correctAnswer}번]</span> {q.explanation}
-                </div>
-              )}
+
+              {/* Col 2: 6~10 */}
+              <div className="pl-2 space-y-3">
+                {haccpQuestions.slice(5, 10).map((q, idx) => (
+                  <div key={q.id} className="pb-1" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                    <p className="font-bold text-stone-900 leading-snug mb-0.5">
+                      <span className="font-bold mr-0.5">{idx + 6}.</span> {q.text}
+                    </p>
+                    {q.context && (
+                      <div className="bg-stone-50 border border-stone-200 px-1.5 py-0.5 mb-0.5 text-[8.5px] text-stone-600">
+                        {q.context}
+                      </div>
+                    )}
+                    <div className="pl-1 text-stone-800 leading-tight space-y-0.5">
+                      {q.options.map((opt, oIdx) => (
+                        <div key={oIdx} className="flex items-start gap-1">
+                          <span className="font-bold text-stone-900 shrink-0">{['①', '②', '③', '④', '⑤'][oIdx]}</span>
+                          <span>
+                            {opt}
+                            {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
+                              <span className="text-emerald-800 font-bold ml-1">[★ 정답]</span>
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {examPaperType === 'teacher' && (
+                      <div className="mt-1 p-1 bg-emerald-50 border border-emerald-300 rounded text-[8.5px] text-emerald-900">
+                        <b>[정답: {q.correctAnswer}번]</b> {q.explanation}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
-          ))}
+          </div>
+
+          <div className="text-center pt-1 mt-1 border-t border-stone-300 text-[9px] text-stone-600 font-bold" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+            - 1 / 2 면 [ 다음 면(뒷면) 11~20번에 계속 ] -
+          </div>
+        </div>
+
+        {/* PAGE 2 (뒷면: 11번~20번 2단 다단) */}
+        <div className="print-page flex flex-col justify-between" style={{ boxSizing: 'border-box', padding: '4mm 6mm 3mm 6mm', fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
+          <div>
+            <div className="flex justify-between items-center border-b border-stone-900 pb-0.5 mb-1 text-[9.5px]" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+              <span className="font-bold text-stone-900 text-[11px]">
+                {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지 (제 2 면 - 뒷면: 11~20번)
+              </span>
+              <span className="text-stone-700 font-bold">성명: ______________ &nbsp;&nbsp; 소속: ______________</span>
+            </div>
+
+            {/* 2-Column Grid */}
+            <div className="grid grid-cols-2 gap-x-5 relative text-[9.5px]" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+              <div className="absolute left-1/2 top-0 bottom-0 w-[1px] bg-stone-300 -translate-x-1/2" />
+              {/* Col 1: 11~15 */}
+              <div className="pr-2 space-y-3">
+                {haccpQuestions.slice(10, 15).map((q, idx) => (
+                  <div key={q.id} className="pb-1" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                    <p className="font-bold text-stone-900 leading-snug mb-0.5">
+                      <span className="font-bold mr-0.5">{idx + 11}.</span> {q.text}
+                    </p>
+                    {q.context && (
+                      <div className="bg-stone-50 border border-stone-200 px-1.5 py-0.5 mb-0.5 text-[8.5px] text-stone-600">
+                        {q.context}
+                      </div>
+                    )}
+                    <div className="pl-1 text-stone-800 leading-tight space-y-0.5">
+                      {q.options.map((opt, oIdx) => (
+                        <div key={oIdx} className="flex items-start gap-1">
+                          <span className="font-bold text-stone-900 shrink-0">{['①', '②', '③', '④', '⑤'][oIdx]}</span>
+                          <span>
+                            {opt}
+                            {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
+                              <span className="text-emerald-800 font-bold ml-1">[★ 정답]</span>
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {examPaperType === 'teacher' && (
+                      <div className="mt-1 p-1 bg-emerald-50 border border-emerald-300 rounded text-[8.5px] text-emerald-900">
+                        <b>[정답: {q.correctAnswer}번]</b> {q.explanation}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* Col 2: 16~20 */}
+              <div className="pl-2 space-y-3">
+                {haccpQuestions.slice(15, 20).map((q, idx) => (
+                  <div key={q.id} className="pb-1" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                    <p className="font-bold text-stone-900 leading-snug mb-0.5">
+                      <span className="font-bold mr-0.5">{idx + 16}.</span> {q.text}
+                    </p>
+                    {q.context && (
+                      <div className="bg-stone-50 border border-stone-200 px-1.5 py-0.5 mb-0.5 text-[8.5px] text-stone-600">
+                        {q.context}
+                      </div>
+                    )}
+                    <div className="pl-1 text-stone-800 leading-tight space-y-0.5">
+                      {q.options.map((opt, oIdx) => (
+                        <div key={oIdx} className="flex items-start gap-1">
+                          <span className="font-bold text-stone-900 shrink-0">{['①', '②', '③', '④', '⑤'][oIdx]}</span>
+                          <span>
+                            {opt}
+                            {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
+                              <span className="text-emerald-800 font-bold ml-1">[★ 정답]</span>
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {examPaperType === 'teacher' && (
+                      <div className="mt-1 p-1 bg-emerald-50 border border-emerald-300 rounded text-[8.5px] text-emerald-900">
+                        <b>[정답: {q.correctAnswer}번]</b> {q.explanation}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="border border-stone-400 bg-stone-50 px-2 py-0.5 mt-2 text-center text-[9px] text-stone-700" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+              <b>[ - 이하 여백 - ]</b> 문제 풀이를 완료하신 후 기재사항 및 누락된 문항이 없는지 다시 점검하십시오. 수고하셨습니다.
+            </div>
+          </div>
+
+          <div className="flex justify-between items-center pt-1 border-t border-stone-300 text-[9px] text-stone-500" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+            <span>주식회사 국순당 품질보증팀</span>
+            <span>- 2 / 2 면 (끝) -</span>
+            <span>HACCP 식품안전관리인증기준</span>
+          </div>
         </div>
       </div>
 

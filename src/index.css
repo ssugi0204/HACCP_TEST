@@ -19,23 +19,60 @@
 
 /* Print Styles */
 @media print {
-  body {
-    background: white !important;
-    color: black !important;
-    font-family: 'Gowun Batang', 'Noto Serif KR', serif !important;
+  @page {
+    size: A4 portrait;
+    margin: 5mm 6mm 5mm 6mm;
   }
-  .no-print, header, nav, footer, button, aside {
+  html, body {
+    background: white !important;
+    color: #111827 !important;
+    font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  /* 인쇄 시 화면의 모든 고정 UI, 모달 배경, 버튼, 헤더 등 완전 은닉 */
+  .no-print, header, nav, footer, button, aside, .fixed, [role="dialog"], .backdrop-blur-xs {
     display: none !important;
   }
+  /* body에 인쇄 클래스가 부여되었을 때도 비인쇄 영역 확실히 은닉 */
+  body.kooksoondang-printing-exam > *:not(.print-only) {
+    display: none !important;
+  }
+  /* 인쇄 전용 영역 강제 표시 */
   .print-only {
     display: block !important;
+    position: relative !important;
+    left: 0 !important;
+    top: 0 !important;
     width: 100% !important;
     margin: 0 !important;
     padding: 0 !important;
+    box-sizing: border-box !important;
+    background: white !important;
+    color: #111827 !important;
+  }
+  .print-page {
+    width: 100% !important;
+    box-sizing: border-box !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: space-between !important;
+    page-break-after: always !important;
+    break-after: page !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+    overflow: visible !important;
+    padding-bottom: 2mm !important;
+  }
+  .print-page:last-child {
+    page-break-after: auto !important;
+    break-after: auto !important;
   }
   .page-break-avoid {
-    break-inside: avoid;
-    page-break-inside: avoid;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
   }
 }
 
