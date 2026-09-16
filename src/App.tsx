@@ -1442,15 +1442,20 @@ export default function App() {
               box-shadow: 0 8px 24px rgba(0,0,0,0.12);
             }
             .print-page {
-              width: 100%;
+              width: 210mm;
+              height: 297mm;
+              max-height: 297mm;
+              padding: 5mm 7mm 4mm 7mm;
               box-sizing: border-box;
               display: flex;
               flex-direction: column;
               justify-content: space-between;
               page-break-after: always;
               break-after: page;
+              page-break-inside: avoid;
+              break-inside: avoid;
               background: white;
-              overflow: visible;
+              overflow: hidden;
             }
             .print-page:last-child {
               page-break-after: auto;
@@ -1461,10 +1466,15 @@ export default function App() {
               width: 100%;
             }
             @media print {
+              @page {
+                size: A4 portrait;
+                margin: 0;
+              }
               html, body {
                 background: white !important;
                 padding: 0 !important;
                 margin: 0 !important;
+                width: 210mm !important;
               }
               .no-print-toolbar {
                 display: none !important;
@@ -1472,16 +1482,19 @@ export default function App() {
               .paper-wrapper {
                 box-shadow: none !important;
                 margin: 0 !important;
-                max-width: 100% !important;
-                width: 100% !important;
+                max-width: 210mm !important;
+                width: 210mm !important;
               }
               .print-page {
-                min-height: 0 !important;
+                width: 210mm !important;
+                height: 297mm !important;
+                max-height: 297mm !important;
+                padding: 5mm 7mm 4mm 7mm !important;
                 page-break-after: always !important;
                 break-after: page !important;
                 page-break-inside: avoid !important;
                 break-inside: avoid !important;
-                overflow: visible !important;
+                overflow: hidden !important;
               }
               .print-page:last-child {
                 page-break-after: auto !important;
@@ -1547,7 +1560,7 @@ export default function App() {
               <style>
                 @page {
                   size: A4 portrait;
-                  margin: 5mm 6mm 5mm 6mm;
+                  margin: 0;
                 }
                 * {
                   box-sizing: border-box;
@@ -1560,19 +1573,24 @@ export default function App() {
                   font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
                   background: white;
                   color: #111827;
-                  width: 100%;
+                  width: 210mm;
                   margin: 0;
                   padding: 0;
                 }
                 .print-page {
-                  width: 100%;
+                  width: 210mm;
+                  height: 297mm;
+                  max-height: 297mm;
+                  padding: 5mm 7mm 4mm 7mm;
                   box-sizing: border-box;
                   display: flex;
                   flex-direction: column;
                   justify-content: space-between;
                   page-break-after: always;
                   break-after: page;
-                  overflow: visible;
+                  page-break-inside: avoid;
+                  break-inside: avoid;
+                  overflow: hidden;
                 }
                 .print-page:last-child {
                   page-break-after: auto;
@@ -1584,18 +1602,26 @@ export default function App() {
                 }
                 @media print {
                   .no-print { display: none !important; }
+                  @page {
+                    size: A4 portrait;
+                    margin: 0;
+                  }
                   html, body {
                     background: white !important;
                     margin: 0 !important;
                     padding: 0 !important;
+                    width: 210mm !important;
                   }
                   .print-page {
-                    min-height: 0 !important;
+                    width: 210mm !important;
+                    height: 297mm !important;
+                    max-height: 297mm !important;
+                    padding: 5mm 7mm 4mm 7mm !important;
                     page-break-after: always !important;
                     break-after: page !important;
                     page-break-inside: avoid !important;
                     break-inside: avoid !important;
-                    overflow: visible !important;
+                    overflow: hidden !important;
                   }
                   .print-page:last-child {
                     page-break-after: auto !important;
@@ -1646,7 +1672,7 @@ export default function App() {
               <style>
                 @page {
                   size: A4 portrait;
-                  margin: 5mm 6mm 5mm 6mm;
+                  margin: 0;
                 }
                 * {
                   box-sizing: border-box;
@@ -1659,19 +1685,24 @@ export default function App() {
                   font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
                   background: white;
                   color: #111827;
-                  width: 100%;
+                  width: 210mm;
                   margin: 0;
                   padding: 0;
                 }
                 .print-page {
-                  width: 100%;
+                  width: 210mm;
+                  height: 297mm;
+                  max-height: 297mm;
+                  padding: 5mm 7mm 4mm 7mm;
                   box-sizing: border-box;
                   display: flex;
                   flex-direction: column;
                   justify-content: space-between;
                   page-break-after: always;
                   break-after: page;
-                  overflow: visible;
+                  page-break-inside: avoid;
+                  break-inside: avoid;
+                  overflow: hidden;
                 }
                 .print-page:last-child {
                   page-break-after: auto;
@@ -1682,18 +1713,26 @@ export default function App() {
                   width: 100%;
                 }
                 @media print {
+                  @page {
+                    size: A4 portrait;
+                    margin: 0;
+                  }
                   html, body {
                     background: white !important;
                     margin: 0 !important;
                     padding: 0 !important;
+                    width: 210mm !important;
                   }
                   .print-page {
-                    min-height: 0 !important;
+                    width: 210mm !important;
+                    height: 297mm !important;
+                    max-height: 297mm !important;
+                    padding: 5mm 7mm 4mm 7mm !important;
                     page-break-after: always !important;
                     break-after: page !important;
                     page-break-inside: avoid !important;
                     break-inside: avoid !important;
-                    overflow: visible !important;
+                    overflow: hidden !important;
                   }
                   .print-page:last-child {
                     page-break-after: auto !important;
@@ -1764,25 +1803,25 @@ export default function App() {
         return questions.map((q, qIdx) => {
           const num = startIndex + qIdx + 1;
           return `
-            <div style="margin-bottom: 14px; padding-bottom: 4px; page-break-inside: avoid;">
-              <div style="font-weight: bold; font-size: 11.5px; color: #111827; line-height: 1.38; margin-bottom: 5px; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+            <div style="margin-bottom: 10px; padding-bottom: 2px; page-break-inside: avoid;">
+              <div style="font-weight: bold; font-size: 10.5px; color: #111827; line-height: 1.32; margin-bottom: 3px; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
                 ${num}. ${q.text}
               </div>
               ${q.context ? `
-                <div style="background: #f3f4f6; border: 1px solid #d1d5db; padding: 3px 6px; font-size: 9.8px; color: #374151; margin-bottom: 5px; line-height: 1.32; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+                <div style="background: #f3f4f6; border: 1px solid #d1d5db; padding: 2.5px 5px; font-size: 9px; color: #374151; margin-bottom: 3px; line-height: 1.28; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
                   ${q.context}
                 </div>
               ` : ''}
-              <div style="padding-left: 2px; font-size: 10.8px; color: #1f2937; line-height: 1.35; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+              <div style="padding-left: 2px; font-size: 9.8px; color: #1f2937; line-height: 1.3; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
                 ${q.options.map((opt, oIdx) => `
-                  <div style="display: flex; align-items: flex-start; gap: 3px; margin-bottom: 2px;">
+                  <div style="display: flex; align-items: flex-start; gap: 3px; margin-bottom: 1.5px;">
                     <span style="font-weight: bold; color: #111827; flex-shrink: 0;">${circleChars[oIdx] || `(${oIdx + 1})`}</span>
                     <span>${opt}${isTeacher && q.correctAnswer === oIdx + 1 ? '<b style="color: #047857; margin-left: 4px;">[★ 정답]</b>' : ''}</span>
                   </div>
                 `).join('')}
               </div>
               ${isTeacher ? `
-                <div style="background: #ecfdf5; border: 1px solid #10b981; border-radius: 3px; padding: 2.5px 6px; margin-top: 4px; font-size: 9.8px; color: #065f46; line-height: 1.32; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+                <div style="background: #ecfdf5; border: 1px solid #10b981; border-radius: 3px; padding: 2px 5px; margin-top: 3px; font-size: 9px; color: #065f46; line-height: 1.28; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
                   <b>[정답: ${q.correctAnswer}번]</b> ${q.explanation}
                 </div>
               ` : ''}
@@ -1947,7 +1986,7 @@ export default function App() {
       return questions.map((q, qIdx) => {
         const num = startIndex + qIdx + 1;
         return `
-          <div style="margin-bottom: 9pt; page-break-inside: avoid; mso-line-height-rule: exactly; font-family: 'Gulim', '굴림', 'GulimChe', sans-serif;">
+          <div style="margin-bottom: 9pt; page-break-inside: avoid; mso-line-height-rule: exactly; font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;">
             <div style="font-size: 10.5pt; font-weight: bold; color: #111111; line-height: 1.35; margin-bottom: 2.5pt;">
               ${num}. ${q.text}
             </div>
@@ -2000,7 +2039,7 @@ export default function App() {
           page: Section1;
         }
         body {
-          font-family: 'Gulim', '굴림', 'GulimChe', '굴림체', sans-serif;
+          font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
           font-size: 9.8pt;
           line-height: 1.32;
           color: #111111;
@@ -2014,6 +2053,7 @@ export default function App() {
           font-weight: bold;
           letter-spacing: 1.5px;
           margin-bottom: 1pt;
+          font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;
         }
         h1 {
           text-align: center;
@@ -2021,7 +2061,7 @@ export default function App() {
           font-weight: bold;
           margin: 0 0 1pt 0;
           color: #111111;
-          font-family: 'Gulim', '굴림', sans-serif;
+          font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;
         }
         .sub-title {
           text-align: center;
@@ -2029,11 +2069,13 @@ export default function App() {
           color: #374151;
           font-weight: bold;
           margin-bottom: 2.5pt;
+          font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;
         }
         table.hdr-table {
           width: 100%;
           border-collapse: collapse;
           margin-bottom: 2.5pt;
+          font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;
         }
         table.hdr-table th, table.hdr-table td {
           border: 0.5pt solid #333333;
@@ -5801,19 +5843,19 @@ service cloud.firestore {
       {/* ----------------- PRINT ONLY EXAM PAPER CONTAINER FOR WINDOW.PRINT() (A4 양면 1장) ----------------- */}
       <div className="print-only bg-white text-stone-900" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
         {/* PAGE 1 (앞면: 1번~10번 2단 다단) */}
-        <div className="print-page flex flex-col justify-between" style={{ boxSizing: 'border-box', pageBreakAfter: 'always', breakAfter: 'page', padding: '4mm 6mm 3mm 6mm', fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
+        <div className="print-page flex flex-col justify-between" style={{ width: '210mm', height: '297mm', maxHeight: '297mm', boxSizing: 'border-box', pageBreakAfter: 'always', breakAfter: 'page', pageBreakInside: 'avoid', breakInside: 'avoid', overflow: 'hidden', padding: '5mm 7mm 4mm 7mm', fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
           <div>
-            <div className="text-center mb-0.5 text-[9.5px] font-bold tracking-widest text-stone-600">
+            <div className="text-center mb-0.5 text-[9px] font-bold tracking-widest text-stone-600">
               KOOKSOONDANG | 주식회사 국순당 횡성양조장
             </div>
-            <h1 className="text-center text-[15px] font-bold text-stone-900 mb-0.5" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+            <h1 className="text-center text-[14px] font-bold text-stone-900 mb-0.5" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
               {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지
             </h1>
-            <p className="text-center text-[9.5px] text-stone-600 font-bold mb-1">
+            <p className="text-center text-[9px] text-stone-600 font-bold mb-1">
               주관 부서: 품질보증팀 &nbsp;|&nbsp; {examPaperType === 'student' ? '[ 수험생 응시용 문제지 (제 1 면 - 앞면: 1~10번) ]' : '[ 관리자용 정답 및 해설지 (제 1 면 - 앞면: 1~10번) ]'}
             </p>
 
-            <table className="w-full border-collapse border border-stone-900 text-center text-[9.5px] mb-1" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+            <table className="w-full border-collapse border border-stone-900 text-center text-[9px] mb-1" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
               <tbody>
                 <tr>
                   <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold" width="12%">소 속</th>
@@ -5821,7 +5863,7 @@ service cloud.firestore {
                   <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold" width="12%">성 명</th>
                   <td className="border border-stone-900 p-0.5" width="24%"></td>
                   <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold" width="14%">결 재</th>
-                  <td className="border border-stone-900 p-0.5 text-[8.5px]" width="14%">담당 / 팀장</td>
+                  <td className="border border-stone-900 p-0.5 text-[8px]" width="14%">담당 / 팀장</td>
                 </tr>
                 <tr>
                   <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold">평가 일자</th>
@@ -5829,27 +5871,27 @@ service cloud.firestore {
                   <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold">평가 점수</th>
                   <td className="border border-stone-900 p-0.5 font-bold">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 점 / 100점</td>
                   <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold">판 정</th>
-                  <td className="border border-stone-900 p-0.5 font-bold text-[9.5px]">[ 합격 &nbsp;/&nbsp; 재평가 ]</td>
+                  <td className="border border-stone-900 p-0.5 font-bold text-[9px]">[ 합격 &nbsp;/&nbsp; 재평가 ]</td>
                 </tr>
               </tbody>
             </table>
 
-            <div className="border border-stone-400 bg-stone-50 px-2 py-0.5 mb-1.5 text-[9px] leading-snug" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+            <div className="border border-stone-400 bg-stone-50 px-2 py-0.5 mb-1.5 text-[8.5px] leading-tight" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
               <b>[평가 안내사항]</b> ① 총 20문항(문항당 5점 배점)이며 70점 이상 합격입니다. ② 첫번째 장(앞면): 1~10번 / 두번째 장(뒷면): 11~20번입니다.
             </div>
 
             {/* 2-Column Grid */}
-            <div className="grid grid-cols-2 gap-x-5 relative text-[9.5px]" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+            <div className="grid grid-cols-2 gap-x-4 relative text-[9px]" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
               <div className="absolute left-1/2 top-0 bottom-0 w-[1px] bg-stone-300 -translate-x-1/2" />
               {/* Col 1: 1~5 */}
-              <div className="pr-2 space-y-3">
+              <div className="pr-2 space-y-2">
                 {haccpQuestions.slice(0, 5).map((q, idx) => (
-                  <div key={q.id} className="pb-1" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                  <div key={q.id} className="pb-0.5" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
                     <p className="font-bold text-stone-900 leading-snug mb-0.5">
                       <span className="font-bold mr-0.5">{idx + 1}.</span> {q.text}
                     </p>
                     {q.context && (
-                      <div className="bg-stone-50 border border-stone-200 px-1.5 py-0.5 mb-0.5 text-[8.5px] text-stone-600">
+                      <div className="bg-stone-50 border border-stone-200 px-1 py-0.5 mb-0.5 text-[8px] text-stone-600 leading-tight">
                         {q.context}
                       </div>
                     )}
@@ -5867,7 +5909,7 @@ service cloud.firestore {
                       ))}
                     </div>
                     {examPaperType === 'teacher' && (
-                      <div className="mt-1 p-1 bg-emerald-50 border border-emerald-300 rounded text-[8.5px] text-emerald-900">
+                      <div className="mt-0.5 p-0.5 bg-emerald-50 border border-emerald-300 rounded text-[8px] text-emerald-900 leading-tight">
                         <b>[정답: {q.correctAnswer}번]</b> {q.explanation}
                       </div>
                     )}
@@ -5876,14 +5918,14 @@ service cloud.firestore {
               </div>
 
               {/* Col 2: 6~10 */}
-              <div className="pl-2 space-y-3">
+              <div className="pl-2 space-y-2">
                 {haccpQuestions.slice(5, 10).map((q, idx) => (
-                  <div key={q.id} className="pb-1" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                  <div key={q.id} className="pb-0.5" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
                     <p className="font-bold text-stone-900 leading-snug mb-0.5">
                       <span className="font-bold mr-0.5">{idx + 6}.</span> {q.text}
                     </p>
                     {q.context && (
-                      <div className="bg-stone-50 border border-stone-200 px-1.5 py-0.5 mb-0.5 text-[8.5px] text-stone-600">
+                      <div className="bg-stone-50 border border-stone-200 px-1 py-0.5 mb-0.5 text-[8px] text-stone-600 leading-tight">
                         {q.context}
                       </div>
                     )}
@@ -5901,7 +5943,7 @@ service cloud.firestore {
                       ))}
                     </div>
                     {examPaperType === 'teacher' && (
-                      <div className="mt-1 p-1 bg-emerald-50 border border-emerald-300 rounded text-[8.5px] text-emerald-900">
+                      <div className="mt-0.5 p-0.5 bg-emerald-50 border border-emerald-300 rounded text-[8px] text-emerald-900 leading-tight">
                         <b>[정답: {q.correctAnswer}번]</b> {q.explanation}
                       </div>
                     )}
@@ -5911,33 +5953,33 @@ service cloud.firestore {
             </div>
           </div>
 
-          <div className="text-center pt-1 mt-1 border-t border-stone-300 text-[9px] text-stone-600 font-bold" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+          <div className="text-center pt-0.5 mt-0.5 border-t border-stone-300 text-[8.5px] text-stone-600 font-bold" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
             - 1 / 2 면 [ 다음 면(뒷면) 11~20번에 계속 ] -
           </div>
         </div>
 
         {/* PAGE 2 (뒷면: 11번~20번 2단 다단) */}
-        <div className="print-page flex flex-col justify-between" style={{ boxSizing: 'border-box', padding: '4mm 6mm 3mm 6mm', fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
+        <div className="print-page flex flex-col justify-between" style={{ width: '210mm', height: '297mm', maxHeight: '297mm', boxSizing: 'border-box', pageBreakInside: 'avoid', breakInside: 'avoid', overflow: 'hidden', padding: '5mm 7mm 4mm 7mm', fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
           <div>
-            <div className="flex justify-between items-center border-b border-stone-900 pb-0.5 mb-1 text-[9.5px]" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
-              <span className="font-bold text-stone-900 text-[11px]">
+            <div className="flex justify-between items-center border-b border-stone-900 pb-0.5 mb-1 text-[9px]" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+              <span className="font-bold text-stone-900 text-[10.5px]">
                 {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지 (제 2 면 - 뒷면: 11~20번)
               </span>
-              <span className="text-stone-700 font-bold">성명: ______________ &nbsp;&nbsp; 소속: ______________</span>
+              <span className="text-stone-700 font-bold text-[8.5px]">성명: ______________ &nbsp;&nbsp; 소속: ______________</span>
             </div>
 
             {/* 2-Column Grid */}
-            <div className="grid grid-cols-2 gap-x-5 relative text-[9.5px]" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+            <div className="grid grid-cols-2 gap-x-4 relative text-[9px]" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
               <div className="absolute left-1/2 top-0 bottom-0 w-[1px] bg-stone-300 -translate-x-1/2" />
               {/* Col 1: 11~15 */}
-              <div className="pr-2 space-y-3">
+              <div className="pr-2 space-y-2">
                 {haccpQuestions.slice(10, 15).map((q, idx) => (
-                  <div key={q.id} className="pb-1" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                  <div key={q.id} className="pb-0.5" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
                     <p className="font-bold text-stone-900 leading-snug mb-0.5">
                       <span className="font-bold mr-0.5">{idx + 11}.</span> {q.text}
                     </p>
                     {q.context && (
-                      <div className="bg-stone-50 border border-stone-200 px-1.5 py-0.5 mb-0.5 text-[8.5px] text-stone-600">
+                      <div className="bg-stone-50 border border-stone-200 px-1 py-0.5 mb-0.5 text-[8px] text-stone-600 leading-tight">
                         {q.context}
                       </div>
                     )}
@@ -5955,7 +5997,7 @@ service cloud.firestore {
                       ))}
                     </div>
                     {examPaperType === 'teacher' && (
-                      <div className="mt-1 p-1 bg-emerald-50 border border-emerald-300 rounded text-[8.5px] text-emerald-900">
+                      <div className="mt-0.5 p-0.5 bg-emerald-50 border border-emerald-300 rounded text-[8px] text-emerald-900 leading-tight">
                         <b>[정답: {q.correctAnswer}번]</b> {q.explanation}
                       </div>
                     )}
@@ -5964,14 +6006,14 @@ service cloud.firestore {
               </div>
 
               {/* Col 2: 16~20 */}
-              <div className="pl-2 space-y-3">
+              <div className="pl-2 space-y-2">
                 {haccpQuestions.slice(15, 20).map((q, idx) => (
-                  <div key={q.id} className="pb-1" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                  <div key={q.id} className="pb-0.5" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
                     <p className="font-bold text-stone-900 leading-snug mb-0.5">
                       <span className="font-bold mr-0.5">{idx + 16}.</span> {q.text}
                     </p>
                     {q.context && (
-                      <div className="bg-stone-50 border border-stone-200 px-1.5 py-0.5 mb-0.5 text-[8.5px] text-stone-600">
+                      <div className="bg-stone-50 border border-stone-200 px-1 py-0.5 mb-0.5 text-[8px] text-stone-600 leading-tight">
                         {q.context}
                       </div>
                     )}
@@ -5989,7 +6031,7 @@ service cloud.firestore {
                       ))}
                     </div>
                     {examPaperType === 'teacher' && (
-                      <div className="mt-1 p-1 bg-emerald-50 border border-emerald-300 rounded text-[8.5px] text-emerald-900">
+                      <div className="mt-0.5 p-0.5 bg-emerald-50 border border-emerald-300 rounded text-[8px] text-emerald-900 leading-tight">
                         <b>[정답: {q.correctAnswer}번]</b> {q.explanation}
                       </div>
                     )}
@@ -5998,12 +6040,12 @@ service cloud.firestore {
               </div>
             </div>
 
-            <div className="border border-stone-400 bg-stone-50 px-2 py-0.5 mt-2 text-center text-[9px] text-stone-700" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+            <div className="border border-stone-400 bg-stone-50 px-2 py-0.5 mt-1.5 text-center text-[8.5px] text-stone-700" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
               <b>[ - 이하 여백 - ]</b> 문제 풀이를 완료하신 후 기재사항 및 누락된 문항이 없는지 다시 점검하십시오. 수고하셨습니다.
             </div>
           </div>
 
-          <div className="flex justify-between items-center pt-1 border-t border-stone-300 text-[9px] text-stone-500" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+          <div className="flex justify-between items-center pt-0.5 border-t border-stone-300 text-[8.5px] text-stone-500" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
             <span>주식회사 국순당 품질보증팀</span>
             <span>- 2 / 2 면 (끝) -</span>
             <span>HACCP 식품안전관리인증기준</span>
