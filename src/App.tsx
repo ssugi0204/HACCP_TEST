@@ -388,6 +388,23 @@ export default function App() {
   // 단발성 Firestore 데이터 가져오기 헬퍼 (일반 수험생 및 새로고침용: 무료 플랜 소켓 연결 0개 소모)
   const fetchExamHistoryOnce = async () => {
     try {
+      // 150명 동시 접속 시 Firebase 50,000회 일일 읽기 할당량 보호: 최근 5분 이내 로컬 캐시가 있으면 수험생은 즉시 반환
+      const cached = localStorage.getItem("haccp_exam_history_admin");
+      const cacheTime = localStorage.getItem("haccp_exam_history_time");
+      const now = Date.now();
+      if (!isAdminMode && cached && cacheTime && now - parseInt(cacheTime, 10) < 5 * 60 * 1000) {
+        try {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setExamHistory(parsed);
+            setIsHistoryLoaded(true);
+            return parsed;
+          }
+        } catch {
+          // ignore parsing error and continue to fetch
+        }
+      }
+
       const querySnapshot = await getDocs(collection(db, "exam_history"));
       const historyData: ExamHistory[] = [];
       querySnapshot.forEach((docSnap) => {
@@ -416,6 +433,7 @@ export default function App() {
       setFirebaseError(null);
       setIsHistoryLoaded(true);
       localStorage.setItem("haccp_exam_history_admin", JSON.stringify(historyData));
+      localStorage.setItem("haccp_exam_history_time", now.toString());
       return historyData;
     } catch (err: any) {
       console.warn("fetchExamHistoryOnce fallback error:", err);
@@ -1374,6 +1392,142 @@ export default function App() {
         return;
       }
 
+      const printStyles = `
+        @page {
+          size: A4 portrait;
+          margin: 6mm 8mm 6mm 8mm;
+        }
+        * {
+          box-sizing: border-box;
+          margin: 0;
+          padding: 0;
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }
+        html, body {
+          font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
+          background: #f1f5f9;
+          color: #111827;
+          width: 100%;
+        }
+        body {
+          padding: 16px;
+        }
+        .no-print-toolbar {
+          max-width: 194mm;
+          margin: 0 auto 16px auto;
+          background: #ffffff;
+          padding: 12px 18px;
+          border-radius: 12px;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          border: 1px solid #e2e8f0;
+        }
+        .toolbar-btn {
+          padding: 8px 16px;
+          border-radius: 8px;
+          font-size: 13px;
+          font-weight: bold;
+          border: none;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+        .btn-print {
+          background: #047857;
+          color: white;
+        }
+        .btn-print:hover {
+          background: #065f46;
+        }
+        .btn-close {
+          background: #4b5563;
+          color: white;
+        }
+        .paper-wrapper {
+          max-width: 194mm;
+          margin: 0 auto;
+          background: white;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+        }
+        .print-page {
+          width: 100%;
+          max-width: 194mm;
+          min-height: 268mm;
+          margin: 0 auto;
+          padding: 0;
+          box-sizing: border-box;
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          page-break-after: always;
+          break-after: page;
+          page-break-inside: avoid;
+          break-inside: avoid;
+          background: white;
+        }
+        .print-page:last-child {
+          page-break-after: auto;
+          break-after: auto;
+        }
+        table {
+          border-collapse: collapse;
+          width: 100%;
+        }
+        .grid { display: grid; }
+        .grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .gap-x-4 { column-gap: 16px; }
+        .relative { position: relative; }
+        .absolute { position: absolute; }
+        .flex { display: flex; }
+        .flex-col { flex-direction: column; }
+        .items-center { align-items: center; }
+        .items-start { align-items: flex-start; }
+        .justify-between { justify-content: space-between; }
+        .text-center { text-align: center; }
+        .w-full { width: 100%; }
+        .border { border-width: 1px; border-style: solid; }
+        .shrink-0 { flex-shrink: 0; }
+        .font-bold { font-weight: bold; }
+        @media print {
+          @page {
+            size: A4 portrait;
+            margin: 6mm 8mm 6mm 8mm;
+          }
+          html, body {
+            background: white !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            width: 100% !important;
+          }
+          .no-print, .no-print-toolbar {
+            display: none !important;
+          }
+          .paper-wrapper {
+            box-shadow: none !important;
+            margin: 0 !important;
+            max-width: 100% !important;
+            width: 100% !important;
+          }
+          .print-page {
+            width: 100% !important;
+            max-width: 194mm !important;
+            min-height: 250mm !important;
+            margin: 0 auto !important;
+            padding: 0 !important;
+            page-break-after: always !important;
+            break-after: page !important;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
+          .print-page:last-child {
+            page-break-after: auto !important;
+            break-after: auto !important;
+          }
+        }
+      `;
+
       popupWin.document.open();
       popupWin.document.write(`
         <!DOCTYPE html>
@@ -1383,133 +1537,15 @@ export default function App() {
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
           <title>${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지 - 국순당</title>
           <style>
-            @page {
-              size: A4 portrait;
-              margin: 5mm 6mm 5mm 6mm;
-            }
-            * {
-              box-sizing: border-box;
-              margin: 0;
-              padding: 0;
-              -webkit-print-color-adjust: exact !important;
-              print-color-adjust: exact !important;
-            }
-            html, body {
-              font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
-              background: #f1f5f9;
-              color: #111827;
-              width: 100%;
-            }
-            body {
-              padding: 20px;
-            }
-            .no-print-toolbar {
-              max-width: 210mm;
-              margin: 0 auto 16px auto;
-              background: #ffffff;
-              padding: 12px 18px;
-              border-radius: 12px;
-              box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-              display: flex;
-              align-items: center;
-              justify-content: space-between;
-              border: 1px solid #e2e8f0;
-            }
-            .toolbar-btn {
-              padding: 8px 16px;
-              border-radius: 8px;
-              font-size: 13px;
-              font-weight: bold;
-              border: none;
-              cursor: pointer;
-              transition: all 0.2s;
-            }
-            .btn-print {
-              background: #047857;
-              color: white;
-            }
-            .btn-print:hover {
-              background: #065f46;
-            }
-            .btn-close {
-              background: #4b5563;
-              color: white;
-            }
-            .paper-wrapper {
-              max-width: 210mm;
-              margin: 0 auto;
-              background: white;
-              box-shadow: 0 8px 24px rgba(0,0,0,0.12);
-            }
-            .print-page {
-              width: 210mm;
-              height: 297mm;
-              max-height: 297mm;
-              padding: 5mm 7mm 4mm 7mm;
-              box-sizing: border-box;
-              display: flex;
-              flex-direction: column;
-              justify-content: space-between;
-              page-break-after: always;
-              break-after: page;
-              page-break-inside: avoid;
-              break-inside: avoid;
-              background: white;
-              overflow: hidden;
-            }
-            .print-page:last-child {
-              page-break-after: auto;
-              break-after: auto;
-            }
-            table {
-              border-collapse: collapse;
-              width: 100%;
-            }
-            @media print {
-              @page {
-                size: A4 portrait;
-                margin: 0;
-              }
-              html, body {
-                background: white !important;
-                padding: 0 !important;
-                margin: 0 !important;
-                width: 210mm !important;
-              }
-              .no-print-toolbar {
-                display: none !important;
-              }
-              .paper-wrapper {
-                box-shadow: none !important;
-                margin: 0 !important;
-                max-width: 210mm !important;
-                width: 210mm !important;
-              }
-              .print-page {
-                width: 210mm !important;
-                height: 297mm !important;
-                max-height: 297mm !important;
-                padding: 5mm 7mm 4mm 7mm !important;
-                page-break-after: always !important;
-                break-after: page !important;
-                page-break-inside: avoid !important;
-                break-inside: avoid !important;
-                overflow: hidden !important;
-              }
-              .print-page:last-child {
-                page-break-after: auto !important;
-                break-after: auto !important;
-              }
-            }
+            ${printStyles}
           </style>
-          <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css">
         </head>
         <body>
           <div class="no-print-toolbar">
             <div>
               <strong style="font-size: 15px; color: #0f172a;">${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지 (양면 1장)</strong>
               <div style="font-size: 12px; color: #64748b; margin-top: 2px;">
-                첫번째 장(1~10번) · 두번째 장(11~20번) 맑은고딕 가독성 최적화
+                첫번째 장(앞면: 1~10번) · 두번째 장(뒷면: 11~20번) 가독성 및 A4 규격 최적화
               </div>
             </div>
             <div style="display: flex; gap: 8px;">
@@ -1526,7 +1562,7 @@ export default function App() {
                 setTimeout(function() {
                   window.focus();
                   window.print();
-                }, 400);
+                }, 300);
               ` : ''}
             });
           </script>
@@ -1546,102 +1582,139 @@ export default function App() {
     try {
       showAdminToast("시험지 인쇄 창을 활성화합니다. 인쇄 설정에서 '양면 인쇄(긴 면으로 넘김)'를 확인해주세요.", "info");
 
-      // 1순위: 팝업 인쇄 창 시도 (브라우저 iframe 샌드박스 차단 없이 가장 확실하게 인쇄 대화상자 호출)
       const printContainer = document.querySelector('.print-only');
       if (printContainer) {
+        const printStyles = `
+          @page {
+            size: A4 portrait;
+            margin: 6mm 8mm 6mm 8mm;
+          }
+          * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+          html, body {
+            font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
+            background: white;
+            color: #111827;
+            font-size: 8pt;
+            line-height: 1.25;
+            width: 100%;
+            margin: 0;
+            padding: 0;
+          }
+          .print-page {
+            width: 100%;
+            max-width: 194mm;
+            min-height: 268mm;
+            margin: 0 auto;
+            padding: 0;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            page-break-after: always;
+            break-after: page;
+            page-break-inside: avoid;
+            break-inside: avoid;
+            background: white;
+          }
+          .print-page:last-child {
+            page-break-after: auto;
+            break-after: auto;
+          }
+          table {
+            border-collapse: collapse;
+            width: 100%;
+          }
+          .grid { display: grid; }
+          .grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .gap-x-4 { column-gap: 16px; }
+          .relative { position: relative; }
+          .absolute { position: absolute; }
+          .flex { display: flex; }
+          .flex-col { flex-direction: column; }
+          .items-center { align-items: center; }
+          .items-start { align-items: flex-start; }
+          .justify-between { justify-content: space-between; }
+          .text-center { text-align: center; }
+          .w-full { width: 100%; }
+          .border { border-width: 1px; border-style: solid; }
+          .shrink-0 { flex-shrink: 0; }
+          .font-bold { font-weight: bold; }
+          @media print {
+            .no-print { display: none !important; }
+            @page {
+              size: A4 portrait;
+              margin: 6mm 8mm 6mm 8mm;
+            }
+            html, body {
+              background: white !important;
+              margin: 0 !important;
+              padding: 0 !important;
+              width: 100% !important;
+            }
+            .print-page {
+              width: 100% !important;
+              max-width: 194mm !important;
+              min-height: 250mm !important;
+              margin: 0 auto !important;
+              padding: 0 !important;
+              page-break-after: always !important;
+              break-after: page !important;
+              page-break-inside: avoid !important;
+              break-inside: avoid !important;
+            }
+            .print-page:last-child {
+              page-break-after: auto !important;
+              break-after: auto !important;
+            }
+          }
+        `;
+
+        // 1순위: 팝업 인쇄 창 시도
         const popupWin = window.open('', '_blank', 'width=1050,height=950,scrollbars=yes,resizable=yes');
         if (popupWin) {
           popupWin.document.open();
           popupWin.document.write(`
             <!DOCTYPE html>
-            <html>
+            <html lang="ko">
             <head>
-              <title>${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지</title>
+              <meta charset="utf-8">
+              <title>${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지 - 국순당</title>
               <style>
-                @page {
-                  size: A4 portrait;
-                  margin: 0;
-                }
-                * {
-                  box-sizing: border-box;
-                  margin: 0;
-                  padding: 0;
-                  -webkit-print-color-adjust: exact !important;
-                  print-color-adjust: exact !important;
-                }
-                html, body {
-                  font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
-                  background: white;
-                  color: #111827;
-                  width: 210mm;
-                  margin: 0;
-                  padding: 0;
-                }
-                .print-page {
-                  width: 210mm;
-                  height: 297mm;
-                  max-height: 297mm;
-                  padding: 5mm 7mm 4mm 7mm;
-                  box-sizing: border-box;
-                  display: flex;
-                  flex-direction: column;
-                  justify-content: space-between;
-                  page-break-after: always;
-                  break-after: page;
-                  page-break-inside: avoid;
-                  break-inside: avoid;
-                  overflow: hidden;
-                }
-                .print-page:last-child {
-                  page-break-after: auto;
-                  break-after: auto;
-                }
-                table {
-                  border-collapse: collapse;
-                  width: 100%;
-                }
-                @media print {
-                  .no-print { display: none !important; }
-                  @page {
-                    size: A4 portrait;
-                    margin: 0;
-                  }
-                  html, body {
-                    background: white !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                    width: 210mm !important;
-                  }
-                  .print-page {
-                    width: 210mm !important;
-                    height: 297mm !important;
-                    max-height: 297mm !important;
-                    padding: 5mm 7mm 4mm 7mm !important;
-                    page-break-after: always !important;
-                    break-after: page !important;
-                    page-break-inside: avoid !important;
-                    break-inside: avoid !important;
-                    overflow: hidden !important;
-                  }
-                  .print-page:last-child {
-                    page-break-after: auto !important;
-                    break-after: auto !important;
-                  }
+                ${printStyles}
+                .no-print-btn {
+                  position: fixed;
+                  top: 12px;
+                  right: 12px;
+                  z-index: 9999;
+                  background: #047857;
+                  color: white;
+                  padding: 10px 18px;
+                  border-radius: 8px;
+                  font-size: 13px;
+                  font-weight: bold;
+                  cursor: pointer;
+                  box-shadow: 0 4px 8px rgba(0,0,0,0.25);
+                  border: none;
                 }
               </style>
-              <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css">
             </head>
             <body>
-              <div class="no-print" style="position: fixed; top: 10px; right: 10px; z-index: 9999; background: #047857; color: white; padding: 10px 16px; border-radius: 8px; font-size: 13px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.2);" onclick="window.print()">
-                🖨️ 인쇄 대화상자 열기
-              </div>
+              <button class="no-print no-print-btn" onclick="window.print()">
+                🖨️ 인쇄 대화상자 다시 열기
+              </button>
               ${printContainer.innerHTML}
               <script>
                 window.addEventListener('load', function() {
                   setTimeout(function() {
                     window.focus();
                     window.print();
-                  }, 400);
+                  }, 300);
                 });
               </script>
             </body>
@@ -1666,81 +1739,13 @@ export default function App() {
           iframeDoc.open();
           iframeDoc.write(`
             <!DOCTYPE html>
-            <html>
+            <html lang="ko">
             <head>
-              <title>${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지</title>
+              <meta charset="utf-8">
+              <title>${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지 - 국순당</title>
               <style>
-                @page {
-                  size: A4 portrait;
-                  margin: 0;
-                }
-                * {
-                  box-sizing: border-box;
-                  margin: 0;
-                  padding: 0;
-                  -webkit-print-color-adjust: exact !important;
-                  print-color-adjust: exact !important;
-                }
-                html, body {
-                  font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
-                  background: white;
-                  color: #111827;
-                  width: 210mm;
-                  margin: 0;
-                  padding: 0;
-                }
-                .print-page {
-                  width: 210mm;
-                  height: 297mm;
-                  max-height: 297mm;
-                  padding: 5mm 7mm 4mm 7mm;
-                  box-sizing: border-box;
-                  display: flex;
-                  flex-direction: column;
-                  justify-content: space-between;
-                  page-break-after: always;
-                  break-after: page;
-                  page-break-inside: avoid;
-                  break-inside: avoid;
-                  overflow: hidden;
-                }
-                .print-page:last-child {
-                  page-break-after: auto;
-                  break-after: auto;
-                }
-                table {
-                  border-collapse: collapse;
-                  width: 100%;
-                }
-                @media print {
-                  @page {
-                    size: A4 portrait;
-                    margin: 0;
-                  }
-                  html, body {
-                    background: white !important;
-                    margin: 0 !important;
-                    padding: 0 !important;
-                    width: 210mm !important;
-                  }
-                  .print-page {
-                    width: 210mm !important;
-                    height: 297mm !important;
-                    max-height: 297mm !important;
-                    padding: 5mm 7mm 4mm 7mm !important;
-                    page-break-after: always !important;
-                    break-after: page !important;
-                    page-break-inside: avoid !important;
-                    break-inside: avoid !important;
-                    overflow: hidden !important;
-                  }
-                  .print-page:last-child {
-                    page-break-after: auto !important;
-                    break-after: auto !important;
-                  }
-                }
+                ${printStyles}
               </style>
-              <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css">
             </head>
             <body>
               ${printContainer.innerHTML}
@@ -1799,29 +1804,31 @@ export default function App() {
       const fileName = `${yearText}년도_국순당_HACCP_위생교육_평가시험지(양면1장)${isTeacher ? '_정답해설지' : ''}.pdf`;
       const circleChars = ['①', '②', '③', '④', '⑤'];
 
-      const renderQuestionsPdf = (questions: typeof haccpQuestions, startIndex: number) => {
+      const renderQuestionsPdf = (questions: typeof haccpQuestions, startIndex: number, isPage2: boolean = false) => {
         return questions.map((q, qIdx) => {
           const num = startIndex + qIdx + 1;
+          const isLastInCol = qIdx === 4;
+          const mb = isLastInCol ? '0px' : (isPage2 ? (isTeacher ? '14px' : '26px') : (isTeacher ? '12px' : '20px'));
           return `
-            <div style="margin-bottom: 10px; padding-bottom: 2px; page-break-inside: avoid;">
-              <div style="font-weight: bold; font-size: 10.5px; color: #111827; line-height: 1.32; margin-bottom: 3px; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+            <div style="margin-bottom: ${mb}; padding-bottom: 2px; page-break-inside: avoid;">
+              <div style="font-weight: bold; font-size: 12px; color: #111827; line-height: 1.38; margin-bottom: 4px; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
                 ${num}. ${q.text}
               </div>
               ${q.context ? `
-                <div style="background: #f3f4f6; border: 1px solid #d1d5db; padding: 2.5px 5px; font-size: 9px; color: #374151; margin-bottom: 3px; line-height: 1.28; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+                <div style="background: #f3f4f6; border: 1px solid #d1d5db; padding: 3px 6px; font-size: 10.5px; color: #374151; margin-bottom: 4px; line-height: 1.35; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
                   ${q.context}
                 </div>
               ` : ''}
-              <div style="padding-left: 2px; font-size: 9.8px; color: #1f2937; line-height: 1.3; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+              <div style="padding-left: 2px; font-size: 11px; color: #1f2937; line-height: 1.38; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
                 ${q.options.map((opt, oIdx) => `
-                  <div style="display: flex; align-items: flex-start; gap: 3px; margin-bottom: 1.5px;">
+                  <div style="display: flex; align-items: flex-start; gap: 4px; margin-bottom: ${isPage2 ? (isTeacher ? '2.5px' : '4px') : (isTeacher ? '2px' : '3.5px')};">
                     <span style="font-weight: bold; color: #111827; flex-shrink: 0;">${circleChars[oIdx] || `(${oIdx + 1})`}</span>
                     <span>${opt}${isTeacher && q.correctAnswer === oIdx + 1 ? '<b style="color: #047857; margin-left: 4px;">[★ 정답]</b>' : ''}</span>
                   </div>
                 `).join('')}
               </div>
               ${isTeacher ? `
-                <div style="background: #ecfdf5; border: 1px solid #10b981; border-radius: 3px; padding: 2px 5px; margin-top: 3px; font-size: 9px; color: #065f46; line-height: 1.28; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+                <div style="background: #ecfdf5; border: 1px solid #10b981; border-radius: 3px; padding: 3px 6px; margin-top: 4px; font-size: 10px; color: #065f46; line-height: 1.3; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
                   <b>[정답: ${q.correctAnswer}번]</b> ${q.explanation}
                 </div>
               ` : ''}
@@ -1843,87 +1850,87 @@ export default function App() {
 
       container.innerHTML = `
         <!-- PAGE 1 (앞면: 1~10번) -->
-        <div id="pdf-page-1" style="width: 794px; height: 1123px; padding: 18px 24px 16px 24px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; background: #ffffff; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+        <div id="pdf-page-1" style="width: 794px; height: 1123px; padding: 22px 28px 18px 28px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; background: #ffffff; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
           <div>
-            <div style="text-align: center; margin-bottom: 6px;">
-              <div style="font-size: 10px; font-weight: bold; letter-spacing: 2px; color: #4b5563; margin-bottom: 2px;">
+            <div style="text-align: center; margin-bottom: 7px;">
+              <div style="font-size: 10.5px; font-weight: bold; letter-spacing: 2px; color: #4b5563; margin-bottom: 2px;">
                 KOOKSOONDANG | 주식회사 국순당 횡성양조장
               </div>
-              <h1 style="font-size: 17px; font-weight: bold; margin: 0 0 2px 0; color: #111827; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+              <h1 style="font-size: 18px; font-weight: bold; margin: 0 0 3px 0; color: #111827; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
                 ${yearText}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지
               </h1>
-              <div style="font-size: 10.5px; color: #4b5563; font-weight: bold;">
+              <div style="font-size: 11px; color: #4b5563; font-weight: bold;">
                 주관 부서: 품질보증팀 &nbsp;|&nbsp; ${isTeacher ? '[ 관리자용 정답 및 해설지 (제 1 면 - 앞면: 1~10번) ]' : '[ 수험생 응시용 문제지 (제 1 면 - 앞면: 1~10번) ]'}
               </div>
             </div>
 
-            <table style="width: 100%; border-collapse: collapse; margin-bottom: 5px; font-size: 10.5px; text-align: center; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+            <table style="width: 100%; border-collapse: collapse; margin-bottom: 6px; font-size: 11px; text-align: center; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
               <tbody>
                 <tr>
-                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 2.5px 4px; font-weight: bold;" width="12%">소 속</th>
-                  <td style="border: 1px solid #1f2937; padding: 2.5px 4px;" width="24%"></td>
-                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 2.5px 4px; font-weight: bold;" width="12%">성 명</th>
-                  <td style="border: 1px solid #1f2937; padding: 2.5px 4px;" width="24%"></td>
-                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 2.5px 4px; font-weight: bold;" width="14%">결 재</th>
-                  <td style="border: 1px solid #1f2937; padding: 2.5px 4px; font-size: 9.5px; font-weight: 500;" width="14%">담당 / 팀장</td>
+                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 3px 5px; font-weight: bold;" width="12%">소 속</th>
+                  <td style="border: 1px solid #1f2937; padding: 3px 5px;" width="24%"></td>
+                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 3px 5px; font-weight: bold;" width="12%">성 명</th>
+                  <td style="border: 1px solid #1f2937; padding: 3px 5px;" width="24%"></td>
+                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 3px 5px; font-weight: bold;" width="14%">결 재</th>
+                  <td style="border: 1px solid #1f2937; padding: 3px 5px; font-size: 10px; font-weight: 500;" width="14%">담당 / 팀장</td>
                 </tr>
                 <tr>
-                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 2.5px 4px; font-weight: bold;">평가 일자</th>
-                  <td style="border: 1px solid #1f2937; padding: 2.5px 4px;">${yearText}년 ___월 ___일</td>
-                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 2.5px 4px; font-weight: bold;">평가 점수</th>
-                  <td style="border: 1px solid #1f2937; padding: 2.5px 4px; font-weight: bold;">_____ 점 / 100점</td>
-                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 2.5px 4px; font-weight: bold;">판 정</th>
-                  <td style="border: 1px solid #1f2937; padding: 2.5px 4px; font-size: 9.5px; font-weight: bold;">[ 합격 / 재평가 ]</td>
+                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 3px 5px; font-weight: bold;">평가 일자</th>
+                  <td style="border: 1px solid #1f2937; padding: 3px 5px;">${yearText}년 ___월 ___일</td>
+                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 3px 5px; font-weight: bold;">평가 점수</th>
+                  <td style="border: 1px solid #1f2937; padding: 3px 5px; font-weight: bold;">_____ 점 / 100점</td>
+                  <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 3px 5px; font-weight: bold;">판 정</th>
+                  <td style="border: 1px solid #1f2937; padding: 3px 5px; font-size: 10px; font-weight: bold;">[ 합격 / 재평가 ]</td>
                 </tr>
               </tbody>
             </table>
 
-            <div style="border: 1px solid #9ca3af; background: #f9fafb; padding: 3px 8px; margin-bottom: 7px; font-size: 10px; line-height: 1.35; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+            <div style="border: 1px solid #9ca3af; background: #f9fafb; padding: 4px 8px; margin-bottom: 12px; font-size: 10.5px; line-height: 1.35; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
               <b>[평가 안내사항]</b> ① 총 20문항(문항당 5점 배점)이며 70점 이상 합격입니다. ② 첫번째 장(앞면): 1~10번 / 두번째 장(뒷면): 11~20번입니다.
             </div>
 
-            <div style="display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; position: relative;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; column-gap: 24px; position: relative;">
               <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #cbd5e1; transform: translateX(-50%);"></div>
-              <div style="padding-right: 8px;">
-                ${renderQuestionsPdf(haccpQuestions.slice(0, 5), 0)}
+              <div style="padding-right: 10px;">
+                ${renderQuestionsPdf(haccpQuestions.slice(0, 5), 0, false)}
               </div>
-              <div style="padding-left: 8px;">
-                ${renderQuestionsPdf(haccpQuestions.slice(5, 10), 5)}
+              <div style="padding-left: 10px;">
+                ${renderQuestionsPdf(haccpQuestions.slice(5, 10), 5, false)}
               </div>
             </div>
           </div>
 
-          <div style="border-top: 1px solid #cbd5e1; padding-top: 4px; text-align: center; font-size: 10px; color: #4b5563; font-weight: bold; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+          <div style="border-top: 1px solid #cbd5e1; padding-top: 5px; text-align: center; font-size: 10.5px; color: #4b5563; font-weight: bold; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
             - 1 / 2 면 [ 다음 면(뒷면) 11~20번에 계속 ] -
           </div>
         </div>
 
         <!-- PAGE 2 (뒷면: 11~20번) -->
-        <div id="pdf-page-2" style="width: 794px; height: 1123px; padding: 18px 24px 16px 24px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; background: #ffffff; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+        <div id="pdf-page-2" style="width: 794px; height: 1123px; padding: 22px 28px 18px 28px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; background: #ffffff; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
           <div>
-            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1.5px solid #1f2937; padding-bottom: 4px; margin-bottom: 7px; font-size: 10.5px; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
-              <span style="font-weight: bold; font-size: 12px; color: #111827;">
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1.5px solid #1f2937; padding-bottom: 4px; margin-bottom: 12px; font-size: 11px; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+              <span style="font-weight: bold; font-size: 12.5px; color: #111827;">
                 ${yearText}년도 HACCP 정기 위생교육 평가 시험지 (제 2 면 - 뒷면: 11~20번)
               </span>
               <span style="font-weight: bold; color: #374151;">성명: __________________ &nbsp;&nbsp; 소속: __________________</span>
             </div>
 
-            <div style="display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; position: relative;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; column-gap: 24px; position: relative;">
               <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #cbd5e1; transform: translateX(-50%);"></div>
-              <div style="padding-right: 8px;">
-                ${renderQuestionsPdf(haccpQuestions.slice(10, 15), 10)}
+              <div style="padding-right: 10px;">
+                ${renderQuestionsPdf(haccpQuestions.slice(10, 15), 10, true)}
               </div>
-              <div style="padding-left: 8px;">
-                ${renderQuestionsPdf(haccpQuestions.slice(15, 20), 15)}
+              <div style="padding-left: 10px;">
+                ${renderQuestionsPdf(haccpQuestions.slice(15, 20), 15, true)}
               </div>
             </div>
 
-            <div style="border: 1px solid #9ca3af; background: #f9fafb; padding: 3px 8px; text-align: center; font-size: 10px; color: #374151; margin-top: 7px; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+            <div style="border: 1px solid #9ca3af; background: #f9fafb; padding: 6px 10px; text-align: center; font-size: 11px; color: #374151; margin-top: 14px; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
               <b>[ - 이하 여백 - ]</b> 문제 풀이를 완료하신 후 기재사항 및 누락된 문항이 없는지 다시 점검하십시오. 수고하셨습니다.
             </div>
           </div>
 
-          <div style="border-top: 1px solid #cbd5e1; padding-top: 4px; display: flex; justify-content: space-between; font-size: 10px; color: #4b5563; font-weight: bold; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
+          <div style="border-top: 1px solid #cbd5e1; padding-top: 5px; display: flex; justify-content: space-between; font-size: 10.5px; color: #4b5563; font-weight: bold; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
             <span>주식회사 국순당 품질보증팀</span>
             <span>- 2 / 2 면 (끝) -</span>
             <span>HACCP 식품안전관리인증기준</span>
@@ -3682,8 +3689,189 @@ service cloud.firestore {
                   </form>
                 )}
               </div>
+            ) : isSubmitted ? (
+              /* 2. SUBMISSION RESULT VIEW (ONLY SCORE & RESULT STATUS - NO QUESTIONS / ANSWERS) */
+              <div className="max-w-2xl mx-auto w-full space-y-6 py-2">
+                {/* Result Top Bar */}
+                <div className="no-print bg-white p-4 rounded-xl border border-stone-200 flex flex-wrap items-center justify-between gap-4 shadow-xs">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-bold px-3 py-1 bg-red-100 text-red-700 border border-red-200 rounded-full flex items-center gap-1.5">
+                      <CheckCircle2 size={14} />
+                      답안지 제출 완료
+                    </span>
+                    <span className="text-xs text-stone-600 font-medium">
+                      수험생: <strong className="text-stone-900">{examinee.name}</strong> ({examinee.dept} / {examinee.idNo})
+                    </span>
+                  </div>
+                  <button
+                    onClick={handleExitExam}
+                    className="px-4 py-1.5 bg-emerald-800 hover:bg-emerald-900 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Home size={13} />
+                    처음 화면으로 이동
+                  </button>
+                </div>
+
+                {/* RE-EXAM MODE INDICATOR BANNER */}
+                {isReexamMode && (
+                  <div className="bg-indigo-50 border border-indigo-200 text-indigo-900 px-4 py-2.5 rounded-xl text-xs flex items-center justify-between shadow-2xs">
+                    <div className="flex items-center gap-2 font-bold">
+                      <CheckCircle2 size={15} className="text-indigo-600 shrink-0" />
+                      <span>[2차 재시험 완료] 2차 재시험 채점이 완료되었습니다.</span>
+                    </div>
+                    <span className="text-[10px] bg-indigo-200/70 text-indigo-900 px-2 py-0.5 rounded font-mono font-bold shrink-0">
+                      2차 재시험
+                    </span>
+                  </div>
+                )}
+
+                {/* SUBMISSION RESULT REPORT CARD */}
+                <motion.div
+                  initial={{ scale: 0.95, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  className="bg-white rounded-2xl border-2 border-stone-200 overflow-hidden shadow-md"
+                >
+                  <div className={`p-6 md:p-8 text-center ${isPassed ? 'bg-emerald-50/50' : 'bg-orange-50/40'} border-b border-stone-150 relative`}>
+                    {/* Stamp Overlay */}
+                    <div className="absolute right-4 top-4 md:right-10 md:top-8 rotate-12 select-none pointer-events-none">
+                      <div className={`w-28 h-28 md:w-32 md:h-32 rounded-full border-4 ${
+                        finalScore >= 70 
+                          ? 'border-emerald-700 text-emerald-800 bg-emerald-50/80' 
+                          : finalScore >= 50 
+                            ? 'border-amber-600 text-amber-700 bg-amber-50/80' 
+                            : 'border-red-600 text-red-700 bg-red-50/80'
+                      } flex flex-col items-center justify-center font-bold text-center border-dashed p-1 shadow-sm`}>
+                        <span className="text-[10px] md:text-xs leading-none font-sans font-semibold">국순당</span>
+                        {finalScore >= 70 ? (
+                          <span className="text-base md:text-lg font-extrabold tracking-widest my-1 font-sans text-emerald-800">
+                            합 격
+                          </span>
+                        ) : finalScore >= 50 ? (
+                          <span className="text-base md:text-lg font-extrabold tracking-wider my-1 font-sans text-amber-700">
+                            재평가
+                          </span>
+                        ) : (
+                          <div className="flex flex-col items-center justify-center leading-tight my-0.5">
+                            <span className="text-xs md:text-sm font-black tracking-tight text-red-700">
+                              재교육
+                            </span>
+                            <span className="text-[11px] md:text-xs font-black tracking-tight text-red-600">
+                              + 재평가
+                            </span>
+                          </div>
+                        )}
+                        <span className="text-[9px] md:text-[10px] leading-none font-sans font-medium">횡성양조장</span>
+                      </div>
+                    </div>
+
+                    <div className="max-w-md mx-auto">
+                      <Award className={`mx-auto mb-2 ${isPassed ? 'text-emerald-700' : 'text-amber-600'}`} size={44} />
+                      <h2 className="text-xl md:text-2xl font-serif font-bold text-stone-900">
+                        {isReexamMode ? "2차 재시험 채점 결과 리포트" : "채점 결과 리포트"}
+                      </h2>
+                      <p className="text-xs text-stone-500 mt-1">
+                        {isReexamMode ? "제출하신 2차 재시험 답안지가 정상 채점되었습니다." : "수고하셨습니다! 제출하신 HACCP 답안지가 정상 채점되었습니다."}
+                      </p>
+                      
+                      <div className="grid grid-cols-3 gap-3 my-6 bg-white rounded-xl p-4 border border-stone-200 shadow-2xs">
+                        <div>
+                          <span className="text-[10px] font-bold text-stone-400 block uppercase">종합 점수</span>
+                          <span className={`text-2xl font-mono font-black ${isPassed ? 'text-emerald-800' : finalScore >= 50 ? 'text-amber-700' : 'text-red-600'}`}>{finalScore}점</span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] font-bold text-stone-400 block uppercase">정답 개수</span>
+                          <span className="text-xl font-mono font-bold text-stone-700">{correctCount} / 20개</span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] font-bold text-stone-400 block uppercase">응시 시간</span>
+                          <span className="text-xl font-mono font-bold text-stone-700">{formatTime(secondsElapsed)}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-center gap-3">
+                        {isPassed ? (
+                          <div className="space-y-3 w-full">
+                            <p className="text-sm text-emerald-800 font-semibold flex items-center justify-center gap-1.5 bg-emerald-50/70 p-3.5 rounded-xl border border-emerald-200">
+                              <Check size={18} className="text-emerald-700 shrink-0" />
+                              <span>축하합니다! 합격 기준({passingScoreThreshold}점)을 충족하여 평가를 무사히 통과하였습니다.</span>
+                            </p>
+                            <div className="flex justify-center gap-2">
+                              <button
+                                onClick={handleExitExam}
+                                className="px-6 py-2.5 bg-[#0F5A3E] text-white hover:bg-emerald-800 font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+                              >
+                                확인 및 처음으로
+                              </button>
+                            </div>
+                          </div>
+                        ) : finalScore < 50 ? (
+                          /* 50점 미만: 재교육 + 재평가 대상 (빨간색 테마) */
+                          <div className="space-y-3 w-full">
+                            <div className="text-xs text-red-700 flex flex-col items-center justify-center gap-1.5 font-medium bg-red-50 p-4 rounded-xl border border-red-200 leading-relaxed shadow-2xs">
+                              <span className="flex items-center gap-1.5 text-sm font-bold text-red-800">
+                                <AlertTriangle size={18} className="text-red-600 shrink-0" />
+                                <span>HACCP 재교육 + 재평가 대상 (50점 미만)</span>
+                              </span>
+                              <span className="text-center mt-1 max-w-lg text-red-900 leading-normal">
+                                {isReexamMode 
+                                  ? `2차 재시험에서도 기준 점수(${passingScoreThreshold}점)에 도달하지 못했습니다. 품질보증팀의 별도 심층 교육 및 지도 지침에 따라 주시기 바랍니다.`
+                                  : `귀하의 취득 점수는 ${finalScore}점으로, 50점 미만 [재교육 + 재평가] 대상입니다. 사내 HACCP 평가 규정에 따라 품질보증팀의 재교육을 이수하신 후 품질보증팀의 승인을 받아 재평가에 응시하실 수 있습니다.`}
+                              </span>
+                            </div>
+                            <div className="flex justify-center gap-2">
+                              <button
+                                onClick={handleExitExam}
+                                className="px-6 py-2.5 bg-red-700 hover:bg-red-800 text-white font-bold text-xs rounded-xl transition-colors cursor-pointer shadow-xs"
+                              >
+                                확인 및 처음으로
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          /* 70점 미만 (50점 이상): 재평가 대상 (주황색/앰버 테마) */
+                          <div className="space-y-3 w-full">
+                            <div className="text-xs text-amber-900 flex flex-col items-center justify-center gap-1.5 font-medium bg-amber-50 p-4 rounded-xl border border-amber-200 leading-relaxed shadow-2xs">
+                              <span className="flex items-center gap-1.5 text-sm font-bold text-amber-950">
+                                <AlertTriangle size={18} className="text-amber-600 shrink-0" />
+                                <span>HACCP 재평가 대상 (70점 미만)</span>
+                              </span>
+                              <span className="text-center mt-1 max-w-lg text-amber-900 leading-normal">
+                                {isReexamMode 
+                                  ? `2차 재시험에서도 기준 점수(${passingScoreThreshold}점)에 도달하지 못했습니다. 품질보증팀의 별도 교육 및 지도 지침에 따라 주시기 바랍니다.`
+                                  : `귀하의 취득 점수는 ${finalScore}점으로, 합격 기준(${passingScoreThreshold}점) 미만 [재평가] 대상입니다. 사내 HACCP 평가 규정에 따라 품질보증팀의 승인을 받으신 후 재평가에 응시하실 수 있습니다.`}
+                              </span>
+                            </div>
+                            <div className="flex justify-center gap-2">
+                              <button
+                                onClick={handleExitExam}
+                                className="px-6 py-2.5 bg-stone-700 hover:bg-stone-800 text-white font-bold text-xs rounded-xl transition-colors cursor-pointer shadow-xs"
+                              >
+                                확인 및 처음으로
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+
+                {/* Confidentiality & Security Notice */}
+                <div className="bg-stone-50 rounded-xl p-4 border border-stone-250 text-xs text-stone-600 flex items-start gap-3">
+                  <div className="w-7 h-7 rounded-lg bg-stone-200/80 flex items-center justify-center shrink-0 mt-0.5 text-stone-700 font-bold">
+                    🔒
+                  </div>
+                  <div className="space-y-1">
+                    <p className="font-bold text-stone-800">평가 공정성 및 문항 보안 안내</p>
+                    <p className="leading-relaxed text-stone-500">
+                      사내 HACCP 위생교육 평가의 공정성과 문항 보안을 위하여, 결과 확인 화면에서는 세부 시험 문제, 오답 및 정답 해설이 노출되지 않습니다.
+                      재평가 대상자의 경우 사내 규정에 따라 품질보증팀의 재교육을 이수하신 후 승인을 받아 재평가에 응시하시기 바랍니다.
+                    </p>
+                  </div>
+                </div>
+              </div>
             ) : (
-              /* 2. LIVE EXAM CONTEXT */
+              /* 3. LIVE EXAM CONTEXT (시험 응시 화면) */
               <div className="flex flex-col lg:flex-row gap-6 relative">
                 
                 {/* LEFT SIDE: THE EXAM CONTENT */}
@@ -3716,37 +3904,20 @@ service cloud.firestore {
                       </button>
                     </div>
 
-                    <div className="flex items-center gap-4">
-                      {isSubmitted ? (
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold px-2.5 py-1 bg-red-100 text-red-700 border border-red-200 rounded-full">
-                            제출완료
-                          </span>
-                          <button
-                            onClick={handleExitExam}
-                            className="px-4 py-1.5 bg-emerald-800 hover:bg-emerald-900 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5 cursor-pointer"
-                          >
-                            <Home size={13} />
-                            처음 화면으로 이동
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="flex items-center flex-wrap gap-2 text-stone-700">
-                          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-stone-100 border border-stone-250 rounded-lg text-xs font-medium">
-                            <Clock className={`size-3.5 ${secondsElapsed >= 1500 ? 'text-red-600 animate-pulse' : 'text-emerald-800'}`} />
-                            <span className="text-stone-500">제한시간:</span>
-                            <span className="font-bold font-mono text-stone-800">30분</span>
-                          </div>
-                          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold border shadow-2xs ${
-                            secondsElapsed >= 1500 
-                              ? 'bg-red-50 text-red-700 border-red-200 animate-pulse' 
-                              : 'bg-emerald-50 text-emerald-900 border-emerald-200'
-                          }`}>
-                            <span className="text-[11px] font-medium">남은 시간:</span>
-                            <span className="font-mono text-sm">{formatTime(Math.max(0, EXAM_TIME_LIMIT_SECONDS - secondsElapsed))}</span>
-                          </div>
-                        </div>
-                      )}
+                    <div className="flex items-center flex-wrap gap-2 text-stone-700">
+                      <div className="flex items-center gap-1.5 px-2.5 py-1 bg-stone-100 border border-stone-250 rounded-lg text-xs font-medium">
+                        <Clock className={`size-3.5 ${secondsElapsed >= 1500 ? 'text-red-600 animate-pulse' : 'text-emerald-800'}`} />
+                        <span className="text-stone-500">제한시간:</span>
+                        <span className="font-bold font-mono text-stone-800">30분</span>
+                      </div>
+                      <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold border shadow-2xs ${
+                        secondsElapsed >= 1500 
+                          ? 'bg-red-50 text-red-700 border-red-200 animate-pulse' 
+                          : 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                      }`}>
+                        <span className="text-[11px] font-medium">남은 시간:</span>
+                        <span className="font-mono text-sm">{formatTime(Math.max(0, EXAM_TIME_LIMIT_SECONDS - secondsElapsed))}</span>
+                      </div>
                     </div>
                   </div>
 
@@ -3761,139 +3932,6 @@ service cloud.firestore {
                         2차 재시험
                       </span>
                     </div>
-                  )}
-
-                  {/* SUBMISSION RESULT HEADER BANNER (IF SUBMITTED) */}
-                  {isSubmitted && (
-                    <motion.div
-                      initial={{ scale: 0.95, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      className="bg-white rounded-2xl border-2 border-stone-200 overflow-hidden shadow-md"
-                    >
-                      <div className={`p-6 text-center ${isPassed ? 'bg-emerald-50/50' : 'bg-orange-50/40'} border-b border-stone-150 relative`}>
-                        {/* Stamp Overlay */}
-                        <div className="absolute right-4 top-4 md:right-12 md:top-8 rotate-12 select-none pointer-events-none">
-                          <div className={`w-28 h-28 md:w-32 md:h-32 rounded-full border-4 ${
-                            finalScore >= 70 
-                              ? 'border-emerald-700 text-emerald-800 bg-emerald-50/80' 
-                              : finalScore >= 50 
-                                ? 'border-amber-600 text-amber-700 bg-amber-50/80' 
-                                : 'border-red-600 text-red-700 bg-red-50/80'
-                          } flex flex-col items-center justify-center font-bold text-center border-dashed p-1 shadow-sm`}>
-                            <span className="text-[10px] md:text-xs leading-none font-sans font-semibold">국순당</span>
-                            {finalScore >= 70 ? (
-                              <span className="text-base md:text-lg font-extrabold tracking-widest my-1 font-sans text-emerald-800">
-                                합 격
-                              </span>
-                            ) : finalScore >= 50 ? (
-                              <span className="text-base md:text-lg font-extrabold tracking-wider my-1 font-sans text-amber-700">
-                                재평가
-                              </span>
-                            ) : (
-                              <div className="flex flex-col items-center justify-center leading-tight my-0.5">
-                                <span className="text-xs md:text-sm font-black tracking-tight text-red-700">
-                                  재교육
-                                </span>
-                                <span className="text-[11px] md:text-xs font-black tracking-tight text-red-600">
-                                  + 재평가
-                                </span>
-                              </div>
-                            )}
-                            <span className="text-[9px] md:text-[10px] leading-none font-sans font-medium">횡성양조장</span>
-                          </div>
-                        </div>
-
-                        <div className="max-w-md mx-auto">
-                          <Award className={`mx-auto mb-2 ${isPassed ? 'text-emerald-700' : 'text-amber-600'}`} size={44} />
-                          <h2 className="text-xl font-serif font-bold text-stone-900">
-                            {isReexamMode ? "2차 재시험 채점 결과 리포트" : "채점 결과 리포트"}
-                          </h2>
-                          <p className="text-xs text-stone-500 mt-1">
-                            {isReexamMode ? "제출하신 2차 재시험 답안지가 정상 채점되었습니다." : "수고하셨습니다! 제출하신 HACCP 답안지가 정상 채점되었습니다."}
-                          </p>
-                          
-                          <div className="grid grid-cols-3 gap-3 my-6 bg-white rounded-xl p-4 border border-stone-200">
-                            <div>
-                              <span className="text-[10px] font-bold text-stone-400 block uppercase">종합 점수</span>
-                              <span className={`text-2xl font-mono font-black ${isPassed ? 'text-emerald-800' : finalScore >= 50 ? 'text-amber-700' : 'text-red-600'}`}>{finalScore}점</span>
-                            </div>
-                            <div>
-                              <span className="text-[10px] font-bold text-stone-400 block uppercase">정답 개수</span>
-                              <span className="text-xl font-mono font-bold text-stone-700">{correctCount} / 20개</span>
-                            </div>
-                            <div>
-                              <span className="text-[10px] font-bold text-stone-400 block uppercase">응시 시간</span>
-                              <span className="text-xl font-mono font-bold text-stone-700">{formatTime(secondsElapsed)}</span>
-                            </div>
-                          </div>
-
-                          <div className="flex flex-wrap items-center justify-center gap-3">
-                            {isPassed ? (
-                              <div className="space-y-3 w-full">
-                                <p className="text-sm text-emerald-800 font-semibold flex items-center justify-center gap-1.5 bg-emerald-50/70 p-3.5 rounded-xl border border-emerald-200">
-                                  <Check size={18} className="text-emerald-700" />
-                                  <span>축하합니다! 합격 기준({passingScoreThreshold}점)을 충족하여 평가를 무사히 통과하였습니다.</span>
-                                </p>
-                                <div className="flex justify-center gap-2">
-                                  <button
-                                    onClick={handleExitExam}
-                                    className="px-6 py-2.5 bg-[#0F5A3E] text-white hover:bg-emerald-800 font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
-                                  >
-                                    확인 및 처음으로
-                                  </button>
-                                </div>
-                              </div>
-                            ) : finalScore < 50 ? (
-                              /* 50점 미만: 재교육 + 재평가 대상 (빨간색 테마) */
-                              <div className="space-y-3 w-full">
-                                <div className="text-xs text-red-700 flex flex-col items-center justify-center gap-1.5 font-medium bg-red-50 p-4 rounded-xl border border-red-200 leading-relaxed shadow-2xs">
-                                  <span className="flex items-center gap-1.5 text-sm font-bold text-red-800">
-                                    <AlertTriangle size={18} className="text-red-600 shrink-0" />
-                                    <span>HACCP 재교육 + 재평가 대상 (50점 미만)</span>
-                                  </span>
-                                  <span className="text-center mt-1 max-w-lg text-red-900 leading-normal">
-                                    {isReexamMode 
-                                      ? `2차 재시험에서도 기준 점수(${passingScoreThreshold}점)에 도달하지 못했습니다. 품질보증팀의 별도 심층 교육 및 지도 지침에 따라 주시기 바랍니다.`
-                                      : `귀하의 취득 점수는 ${finalScore}점으로, 50점 미만 [재교육 + 재평가] 대상입니다. 사내 HACCP 평가 규정에 따라 품질보증팀의 재교육을 이수하신 후 품질보증팀의 승인을 받아 재평가에 응시하실 수 있습니다.`}
-                                  </span>
-                                </div>
-                                <div className="flex justify-center gap-2">
-                                  <button
-                                    onClick={handleExitExam}
-                                    className="px-6 py-2.5 bg-red-700 hover:bg-red-800 text-white font-bold text-xs rounded-xl transition-colors cursor-pointer shadow-xs"
-                                  >
-                                    확인 및 처음으로
-                                  </button>
-                                </div>
-                              </div>
-                            ) : (
-                              /* 70점 미만 (50점 이상): 재평가 대상 (주황색/앰버 테마) */
-                              <div className="space-y-3 w-full">
-                                <div className="text-xs text-amber-900 flex flex-col items-center justify-center gap-1.5 font-medium bg-amber-50 p-4 rounded-xl border border-amber-200 leading-relaxed shadow-2xs">
-                                  <span className="flex items-center gap-1.5 text-sm font-bold text-amber-950">
-                                    <AlertTriangle size={18} className="text-amber-600 shrink-0" />
-                                    <span>HACCP 재평가 대상 (70점 미만)</span>
-                                  </span>
-                                  <span className="text-center mt-1 max-w-lg text-amber-900 leading-normal">
-                                    {isReexamMode 
-                                      ? `2차 재시험에서도 기준 점수(${passingScoreThreshold}점)에 도달하지 못했습니다. 품질보증팀의 별도 교육 및 지도 지침에 따라 주시기 바랍니다.`
-                                      : `귀하의 취득 점수는 ${finalScore}점으로, 합격 기준(${passingScoreThreshold}점) 미만 [재평가] 대상입니다. 사내 HACCP 평가 규정에 따라 품질보증팀의 승인을 받으신 후 재평가에 응시하실 수 있습니다.`}
-                                  </span>
-                                </div>
-                                <div className="flex justify-center gap-2">
-                                  <button
-                                    onClick={handleExitExam}
-                                    className="px-6 py-2.5 bg-stone-700 hover:bg-stone-800 text-white font-bold text-xs rounded-xl transition-colors cursor-pointer shadow-xs"
-                                  >
-                                    확인 및 처음으로
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </motion.div>
                   )}
 
                   {/* --- MODE 1: CLASSIC TEST PAPER VIEW (시험지 형식) --- */}
@@ -5843,73 +5881,73 @@ service cloud.firestore {
       {/* ----------------- PRINT ONLY EXAM PAPER CONTAINER FOR WINDOW.PRINT() (A4 양면 1장) ----------------- */}
       <div className="print-only bg-white text-stone-900" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
         {/* PAGE 1 (앞면: 1번~10번 2단 다단) */}
-        <div className="print-page flex flex-col justify-between" style={{ width: '210mm', height: '297mm', maxHeight: '297mm', boxSizing: 'border-box', pageBreakAfter: 'always', breakAfter: 'page', pageBreakInside: 'avoid', breakInside: 'avoid', overflow: 'hidden', padding: '5mm 7mm 4mm 7mm', fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
+        <div className="print-page" style={{ width: '100%', maxWidth: '194mm', minHeight: '268mm', margin: '0 auto', boxSizing: 'border-box', pageBreakAfter: 'always', breakAfter: 'page', pageBreakInside: 'avoid', breakInside: 'avoid', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
           <div>
-            <div className="text-center mb-0.5 text-[9px] font-bold tracking-widest text-stone-600">
+            <div style={{ textAlign: 'center', marginBottom: '2px', fontSize: '8.5pt', fontWeight: 'bold', letterSpacing: '2px', color: '#4b5563' }}>
               KOOKSOONDANG | 주식회사 국순당 횡성양조장
             </div>
-            <h1 className="text-center text-[14px] font-bold text-stone-900 mb-0.5" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+            <h1 style={{ textAlign: 'center', fontSize: '14.5pt', fontWeight: 'bold', color: '#111827', marginBottom: '3px', lineHeight: 1.25, fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
               {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지
             </h1>
-            <p className="text-center text-[9px] text-stone-600 font-bold mb-1">
+            <p style={{ textAlign: 'center', fontSize: '8.5pt', color: '#4b5563', fontWeight: 'bold', marginBottom: '6px' }}>
               주관 부서: 품질보증팀 &nbsp;|&nbsp; {examPaperType === 'student' ? '[ 수험생 응시용 문제지 (제 1 면 - 앞면: 1~10번) ]' : '[ 관리자용 정답 및 해설지 (제 1 면 - 앞면: 1~10번) ]'}
             </p>
 
-            <table className="w-full border-collapse border border-stone-900 text-center text-[9px] mb-1" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', border: '1.2px solid #111827', textAlign: 'center', fontSize: '8.2pt', marginBottom: '6px', fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
               <tbody>
                 <tr>
-                  <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold" width="12%">소 속</th>
-                  <td className="border border-stone-900 p-0.5" width="24%"></td>
-                  <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold" width="12%">성 명</th>
-                  <td className="border border-stone-900 p-0.5" width="24%"></td>
-                  <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold" width="14%">결 재</th>
-                  <td className="border border-stone-900 p-0.5 text-[8px]" width="14%">담당 / 팀장</td>
+                  <th style={{ border: '1px solid #111827', background: '#f3f4f6', padding: '3px 5px', fontWeight: 'bold' }} width="12%">소 속</th>
+                  <td style={{ border: '1px solid #111827', padding: '3px 5px' }} width="24%"></td>
+                  <th style={{ border: '1px solid #111827', background: '#f3f4f6', padding: '3px 5px', fontWeight: 'bold' }} width="12%">성 명</th>
+                  <td style={{ border: '1px solid #111827', padding: '3px 5px' }} width="24%"></td>
+                  <th style={{ border: '1px solid #111827', background: '#f3f4f6', padding: '3px 5px', fontWeight: 'bold' }} width="14%">결 재</th>
+                  <td style={{ border: '1px solid #111827', padding: '3px 5px', fontSize: '7.8pt' }} width="14%">담당 / 팀장</td>
                 </tr>
                 <tr>
-                  <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold">평가 일자</th>
-                  <td className="border border-stone-900 p-0.5">{examPaperYear}년 &nbsp;&nbsp;&nbsp;월 &nbsp;&nbsp;&nbsp;일</td>
-                  <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold">평가 점수</th>
-                  <td className="border border-stone-900 p-0.5 font-bold">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 점 / 100점</td>
-                  <th className="border border-stone-900 bg-stone-100 p-0.5 font-bold">판 정</th>
-                  <td className="border border-stone-900 p-0.5 font-bold text-[9px]">[ 합격 &nbsp;/&nbsp; 재평가 ]</td>
+                  <th style={{ border: '1px solid #111827', background: '#f3f4f6', padding: '3px 5px', fontWeight: 'bold' }}>평가 일자</th>
+                  <td style={{ border: '1px solid #111827', padding: '3px 5px' }}>{examPaperYear}년 &nbsp;&nbsp;&nbsp;월 &nbsp;&nbsp;&nbsp;일</td>
+                  <th style={{ border: '1px solid #111827', background: '#f3f4f6', padding: '3px 5px', fontWeight: 'bold' }}>평가 점수</th>
+                  <td style={{ border: '1px solid #111827', padding: '3px 5px', fontWeight: 'bold' }}>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 점 / 100점</td>
+                  <th style={{ border: '1px solid #111827', background: '#f3f4f6', padding: '3px 5px', fontWeight: 'bold' }}>판 정</th>
+                  <td style={{ border: '1px solid #111827', padding: '3px 5px', fontWeight: 'bold', fontSize: '8pt' }}>[ 합격 &nbsp;/&nbsp; 재평가 ]</td>
                 </tr>
               </tbody>
             </table>
 
-            <div className="border border-stone-400 bg-stone-50 px-2 py-0.5 mb-1.5 text-[8.5px] leading-tight" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+            <div style={{ border: '1px solid #9ca3af', background: '#f9fafb', padding: '3px 6px', marginBottom: '10px', fontSize: '8pt', lineHeight: 1.3, fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
               <b>[평가 안내사항]</b> ① 총 20문항(문항당 5점 배점)이며 70점 이상 합격입니다. ② 첫번째 장(앞면): 1~10번 / 두번째 장(뒷면): 11~20번입니다.
             </div>
 
             {/* 2-Column Grid */}
-            <div className="grid grid-cols-2 gap-x-4 relative text-[9px]" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
-              <div className="absolute left-1/2 top-0 bottom-0 w-[1px] bg-stone-300 -translate-x-1/2" />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: '20px', position: 'relative', fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+              <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, width: '1px', background: '#d1d5db', transform: 'translateX(-50%)' }} />
               {/* Col 1: 1~5 */}
-              <div className="pr-2 space-y-2">
+              <div style={{ paddingRight: '10px' }}>
                 {haccpQuestions.slice(0, 5).map((q, idx) => (
-                  <div key={q.id} className="pb-0.5" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
-                    <p className="font-bold text-stone-900 leading-snug mb-0.5">
-                      <span className="font-bold mr-0.5">{idx + 1}.</span> {q.text}
+                  <div key={q.id} style={{ marginBottom: idx === 4 ? '0px' : (examPaperType === 'teacher' ? '10px' : '18px'), pageBreakInside: 'avoid', breakInside: 'avoid' }}>
+                    <p style={{ fontSize: '9.8pt', fontWeight: 'bold', color: '#111827', lineHeight: 1.35, marginBottom: '3.5px' }}>
+                      <span style={{ fontWeight: 'bold', marginRight: '3px' }}>{idx + 1}.</span> {q.text}
                     </p>
                     {q.context && (
-                      <div className="bg-stone-50 border border-stone-200 px-1 py-0.5 mb-0.5 text-[8px] text-stone-600 leading-tight">
+                      <div style={{ background: '#f3f4f6', border: '1px solid #d1d5db', padding: '2.5px 5px', marginBottom: '3px', fontSize: '8.5pt', color: '#374151', lineHeight: 1.3 }}>
                         {q.context}
                       </div>
                     )}
-                    <div className="pl-1 text-stone-800 leading-tight space-y-0.5">
+                    <div style={{ paddingLeft: '2px', fontSize: '9pt', color: '#1f2937', lineHeight: 1.35 }}>
                       {q.options.map((opt, oIdx) => (
-                        <div key={oIdx} className="flex items-start gap-1">
-                          <span className="font-bold text-stone-900 shrink-0">{['①', '②', '③', '④', '⑤'][oIdx]}</span>
-                          <span>
+                        <div key={oIdx} style={{ display: 'flex', alignItems: 'flex-start', gap: '4px', marginBottom: examPaperType === 'teacher' ? '2px' : '2.5px' }}>
+                          <span style={{ fontWeight: 'bold', color: '#111827', flexShrink: 0 }}>{['①', '②', '③', '④', '⑤'][oIdx]}</span>
+                          <span style={{ wordBreak: 'break-word' }}>
                             {opt}
                             {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
-                              <span className="text-emerald-800 font-bold ml-1">[★ 정답]</span>
+                              <span style={{ color: '#047857', fontWeight: 'bold', marginLeft: '4px' }}>[★ 정답]</span>
                             )}
                           </span>
                         </div>
                       ))}
                     </div>
                     {examPaperType === 'teacher' && (
-                      <div className="mt-0.5 p-0.5 bg-emerald-50 border border-emerald-300 rounded text-[8px] text-emerald-900 leading-tight">
+                      <div style={{ marginTop: '3px', padding: '2.5px 5px', background: '#ecfdf5', border: '1px solid #10b981', borderRadius: '2px', fontSize: '8.2pt', color: '#065f46', lineHeight: 1.25 }}>
                         <b>[정답: {q.correctAnswer}번]</b> {q.explanation}
                       </div>
                     )}
@@ -5918,32 +5956,32 @@ service cloud.firestore {
               </div>
 
               {/* Col 2: 6~10 */}
-              <div className="pl-2 space-y-2">
+              <div style={{ paddingLeft: '10px' }}>
                 {haccpQuestions.slice(5, 10).map((q, idx) => (
-                  <div key={q.id} className="pb-0.5" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
-                    <p className="font-bold text-stone-900 leading-snug mb-0.5">
-                      <span className="font-bold mr-0.5">{idx + 6}.</span> {q.text}
+                  <div key={q.id} style={{ marginBottom: idx === 4 ? '0px' : (examPaperType === 'teacher' ? '10px' : '18px'), pageBreakInside: 'avoid', breakInside: 'avoid' }}>
+                    <p style={{ fontSize: '9.8pt', fontWeight: 'bold', color: '#111827', lineHeight: 1.35, marginBottom: '3.5px' }}>
+                      <span style={{ fontWeight: 'bold', marginRight: '3px' }}>{idx + 6}.</span> {q.text}
                     </p>
                     {q.context && (
-                      <div className="bg-stone-50 border border-stone-200 px-1 py-0.5 mb-0.5 text-[8px] text-stone-600 leading-tight">
+                      <div style={{ background: '#f3f4f6', border: '1px solid #d1d5db', padding: '2.5px 5px', marginBottom: '3px', fontSize: '8.5pt', color: '#374151', lineHeight: 1.3 }}>
                         {q.context}
                       </div>
                     )}
-                    <div className="pl-1 text-stone-800 leading-tight space-y-0.5">
+                    <div style={{ paddingLeft: '2px', fontSize: '9pt', color: '#1f2937', lineHeight: 1.35 }}>
                       {q.options.map((opt, oIdx) => (
-                        <div key={oIdx} className="flex items-start gap-1">
-                          <span className="font-bold text-stone-900 shrink-0">{['①', '②', '③', '④', '⑤'][oIdx]}</span>
-                          <span>
+                        <div key={oIdx} style={{ display: 'flex', alignItems: 'flex-start', gap: '4px', marginBottom: examPaperType === 'teacher' ? '2px' : '2.5px' }}>
+                          <span style={{ fontWeight: 'bold', color: '#111827', flexShrink: 0 }}>{['①', '②', '③', '④', '⑤'][oIdx]}</span>
+                          <span style={{ wordBreak: 'break-word' }}>
                             {opt}
                             {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
-                              <span className="text-emerald-800 font-bold ml-1">[★ 정답]</span>
+                              <span style={{ color: '#047857', fontWeight: 'bold', marginLeft: '4px' }}>[★ 정답]</span>
                             )}
                           </span>
                         </div>
                       ))}
                     </div>
                     {examPaperType === 'teacher' && (
-                      <div className="mt-0.5 p-0.5 bg-emerald-50 border border-emerald-300 rounded text-[8px] text-emerald-900 leading-tight">
+                      <div style={{ marginTop: '3px', padding: '2.5px 5px', background: '#ecfdf5', border: '1px solid #10b981', borderRadius: '2px', fontSize: '8.2pt', color: '#065f46', lineHeight: 1.25 }}>
                         <b>[정답: {q.correctAnswer}번]</b> {q.explanation}
                       </div>
                     )}
@@ -5953,51 +5991,51 @@ service cloud.firestore {
             </div>
           </div>
 
-          <div className="text-center pt-0.5 mt-0.5 border-t border-stone-300 text-[8.5px] text-stone-600 font-bold" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+          <div style={{ textAlign: 'center', paddingTop: '6px', marginTop: '4px', borderTop: '1px solid #d1d5db', fontSize: '8.5pt', color: '#4b5563', fontWeight: 'bold', fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
             - 1 / 2 면 [ 다음 면(뒷면) 11~20번에 계속 ] -
           </div>
         </div>
 
         {/* PAGE 2 (뒷면: 11번~20번 2단 다단) */}
-        <div className="print-page flex flex-col justify-between" style={{ width: '210mm', height: '297mm', maxHeight: '297mm', boxSizing: 'border-box', pageBreakInside: 'avoid', breakInside: 'avoid', overflow: 'hidden', padding: '5mm 7mm 4mm 7mm', fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
+        <div className="print-page" style={{ width: '100%', maxWidth: '194mm', minHeight: '268mm', margin: '0 auto', boxSizing: 'border-box', pageBreakInside: 'avoid', breakInside: 'avoid', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontFamily: "'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif" }}>
           <div>
-            <div className="flex justify-between items-center border-b border-stone-900 pb-0.5 mb-1 text-[9px]" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
-              <span className="font-bold text-stone-900 text-[10.5px]">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1.5px solid #111827', paddingBottom: '3px', marginBottom: '12px', fontSize: '9.5pt', fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+              <span style={{ fontWeight: 'bold', color: '#111827', fontSize: '10pt' }}>
                 {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지 (제 2 면 - 뒷면: 11~20번)
               </span>
-              <span className="text-stone-700 font-bold text-[8.5px]">성명: ______________ &nbsp;&nbsp; 소속: ______________</span>
+              <span style={{ color: '#374151', fontWeight: 'bold', fontSize: '8.5pt' }}>성명: ______________ &nbsp;&nbsp; 소속: ______________</span>
             </div>
 
             {/* 2-Column Grid */}
-            <div className="grid grid-cols-2 gap-x-4 relative text-[9px]" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
-              <div className="absolute left-1/2 top-0 bottom-0 w-[1px] bg-stone-300 -translate-x-1/2" />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: '20px', position: 'relative', fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+              <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, width: '1px', background: '#d1d5db', transform: 'translateX(-50%)' }} />
               {/* Col 1: 11~15 */}
-              <div className="pr-2 space-y-2">
+              <div style={{ paddingRight: '10px' }}>
                 {haccpQuestions.slice(10, 15).map((q, idx) => (
-                  <div key={q.id} className="pb-0.5" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
-                    <p className="font-bold text-stone-900 leading-snug mb-0.5">
-                      <span className="font-bold mr-0.5">{idx + 11}.</span> {q.text}
+                  <div key={q.id} style={{ marginBottom: idx === 4 ? '0px' : (examPaperType === 'teacher' ? '12px' : '25px'), pageBreakInside: 'avoid', breakInside: 'avoid' }}>
+                    <p style={{ fontSize: '9.8pt', fontWeight: 'bold', color: '#111827', lineHeight: 1.35, marginBottom: '3.5px' }}>
+                      <span style={{ fontWeight: 'bold', marginRight: '3px' }}>{idx + 11}.</span> {q.text}
                     </p>
                     {q.context && (
-                      <div className="bg-stone-50 border border-stone-200 px-1 py-0.5 mb-0.5 text-[8px] text-stone-600 leading-tight">
+                      <div style={{ background: '#f3f4f6', border: '1px solid #d1d5db', padding: '2.5px 5px', marginBottom: '3px', fontSize: '8.5pt', color: '#374151', lineHeight: 1.3 }}>
                         {q.context}
                       </div>
                     )}
-                    <div className="pl-1 text-stone-800 leading-tight space-y-0.5">
+                    <div style={{ paddingLeft: '2px', fontSize: '9pt', color: '#1f2937', lineHeight: 1.35 }}>
                       {q.options.map((opt, oIdx) => (
-                        <div key={oIdx} className="flex items-start gap-1">
-                          <span className="font-bold text-stone-900 shrink-0">{['①', '②', '③', '④', '⑤'][oIdx]}</span>
-                          <span>
+                        <div key={oIdx} style={{ display: 'flex', alignItems: 'flex-start', gap: '4px', marginBottom: examPaperType === 'teacher' ? '2.5px' : '3.5px' }}>
+                          <span style={{ fontWeight: 'bold', color: '#111827', flexShrink: 0 }}>{['①', '②', '③', '④', '⑤'][oIdx]}</span>
+                          <span style={{ wordBreak: 'break-word' }}>
                             {opt}
                             {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
-                              <span className="text-emerald-800 font-bold ml-1">[★ 정답]</span>
+                              <span style={{ color: '#047857', fontWeight: 'bold', marginLeft: '4px' }}>[★ 정답]</span>
                             )}
                           </span>
                         </div>
                       ))}
                     </div>
                     {examPaperType === 'teacher' && (
-                      <div className="mt-0.5 p-0.5 bg-emerald-50 border border-emerald-300 rounded text-[8px] text-emerald-900 leading-tight">
+                      <div style={{ marginTop: '3px', padding: '2.5px 5px', background: '#ecfdf5', border: '1px solid #10b981', borderRadius: '2px', fontSize: '8.2pt', color: '#065f46', lineHeight: 1.25 }}>
                         <b>[정답: {q.correctAnswer}번]</b> {q.explanation}
                       </div>
                     )}
@@ -6006,32 +6044,32 @@ service cloud.firestore {
               </div>
 
               {/* Col 2: 16~20 */}
-              <div className="pl-2 space-y-2">
+              <div style={{ paddingLeft: '10px' }}>
                 {haccpQuestions.slice(15, 20).map((q, idx) => (
-                  <div key={q.id} className="pb-0.5" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
-                    <p className="font-bold text-stone-900 leading-snug mb-0.5">
-                      <span className="font-bold mr-0.5">{idx + 16}.</span> {q.text}
+                  <div key={q.id} style={{ marginBottom: idx === 4 ? '0px' : (examPaperType === 'teacher' ? '12px' : '25px'), pageBreakInside: 'avoid', breakInside: 'avoid' }}>
+                    <p style={{ fontSize: '9.8pt', fontWeight: 'bold', color: '#111827', lineHeight: 1.35, marginBottom: '3.5px' }}>
+                      <span style={{ fontWeight: 'bold', marginRight: '3px' }}>{idx + 16}.</span> {q.text}
                     </p>
                     {q.context && (
-                      <div className="bg-stone-50 border border-stone-200 px-1 py-0.5 mb-0.5 text-[8px] text-stone-600 leading-tight">
+                      <div style={{ background: '#f3f4f6', border: '1px solid #d1d5db', padding: '2.5px 5px', marginBottom: '3px', fontSize: '8.5pt', color: '#374151', lineHeight: 1.3 }}>
                         {q.context}
                       </div>
                     )}
-                    <div className="pl-1 text-stone-800 leading-tight space-y-0.5">
+                    <div style={{ paddingLeft: '2px', fontSize: '9pt', color: '#1f2937', lineHeight: 1.35 }}>
                       {q.options.map((opt, oIdx) => (
-                        <div key={oIdx} className="flex items-start gap-1">
-                          <span className="font-bold text-stone-900 shrink-0">{['①', '②', '③', '④', '⑤'][oIdx]}</span>
-                          <span>
+                        <div key={oIdx} style={{ display: 'flex', alignItems: 'flex-start', gap: '4px', marginBottom: examPaperType === 'teacher' ? '2.5px' : '3.5px' }}>
+                          <span style={{ fontWeight: 'bold', color: '#111827', flexShrink: 0 }}>{['①', '②', '③', '④', '⑤'][oIdx]}</span>
+                          <span style={{ wordBreak: 'break-word' }}>
                             {opt}
                             {examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 && (
-                              <span className="text-emerald-800 font-bold ml-1">[★ 정답]</span>
+                              <span style={{ color: '#047857', fontWeight: 'bold', marginLeft: '4px' }}>[★ 정답]</span>
                             )}
                           </span>
                         </div>
                       ))}
                     </div>
                     {examPaperType === 'teacher' && (
-                      <div className="mt-0.5 p-0.5 bg-emerald-50 border border-emerald-300 rounded text-[8px] text-emerald-900 leading-tight">
+                      <div style={{ marginTop: '3px', padding: '2.5px 5px', background: '#ecfdf5', border: '1px solid #10b981', borderRadius: '2px', fontSize: '8.2pt', color: '#065f46', lineHeight: 1.25 }}>
                         <b>[정답: {q.correctAnswer}번]</b> {q.explanation}
                       </div>
                     )}
@@ -6040,12 +6078,12 @@ service cloud.firestore {
               </div>
             </div>
 
-            <div className="border border-stone-400 bg-stone-50 px-2 py-0.5 mt-1.5 text-center text-[8.5px] text-stone-700" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+            <div style={{ border: '1px solid #9ca3af', background: '#f9fafb', padding: '4px 8px', marginTop: '12px', textAlign: 'center', fontSize: '8.5pt', color: '#374151', fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
               <b>[ - 이하 여백 - ]</b> 문제 풀이를 완료하신 후 기재사항 및 누락된 문항이 없는지 다시 점검하십시오. 수고하셨습니다.
             </div>
           </div>
 
-          <div className="flex justify-between items-center pt-0.5 border-t border-stone-300 text-[8.5px] text-stone-500" style={{ fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '6px', marginTop: '4px', borderTop: '1px solid #d1d5db', fontSize: '8.5pt', color: '#6b7280', fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
             <span>주식회사 국순당 품질보증팀</span>
             <span>- 2 / 2 면 (끝) -</span>
             <span>HACCP 식품안전관리인증기준</span>
