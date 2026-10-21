@@ -50,7 +50,7 @@ import { motion, AnimatePresence } from "motion/react";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import { haccpQuestions, Question } from "./data/questions";
-import { collection, addDoc, onSnapshot, query, orderBy, Timestamp, deleteDoc, doc, updateDoc, getDocs } from "firebase/firestore";
+import { collection, addDoc, onSnapshot, query, orderBy, Timestamp, deleteDoc, doc, updateDoc, getDocs, where } from "firebase/firestore";
 import { db } from "./lib/firebase";
 
 // Custom Kooksoondang Logo SVG/HTML Component (High-fidelity corporate brand design)
@@ -170,6 +170,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'exam' | 'history'>('exam');
   const [showSubmitConfirmModal, setShowSubmitConfirmModal] = useState(false);
   const [startExamError, setStartExamError] = useState<string | null>(null);
+  const [isVerifyingExaminee, setIsVerifyingExaminee] = useState(false);
   const [selectedHistoryDetail, setSelectedHistoryDetail] = useState<ExamHistory | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<'all' | 'passed' | 'reexam' | 'retrain' | 'reexam_pending' | 'reexam_approved'>('all');
@@ -220,26 +221,30 @@ export default function App() {
 
   // QR Code 공유 모달 상태
   const [showQrModal, setShowQrModal] = useState(false);
-  const [qrUrl, setQrUrl] = useState("");
+  const [qrUrl, setQrUrl] = useState("https://haccp-test.vercel.app");
   const [copied, setCopied] = useState(false);
 
-  // 구글 로그인 없이 외부 스마트폰에서 누구나 바로 접속 가능한 공식 Vercel 배포 URL
+  // 모바일 스마트폰 시험 응시용 고정 공식 URL (GitHub 연동 Vercel 주소 고정 유지)
   const getPublicShareUrl = () => {
-    const vercelUrl = "https://haccp-test.vercel.app";
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("saved_custom_qr_url");
-      if (saved && saved.trim().startsWith("http")) {
+      if (saved && saved.trim().startsWith("http") && !saved.includes("ais-pre-") && !saved.includes("ais-dev-")) {
         return saved.trim();
       }
-      if (window.location.hostname.includes("vercel.app")) {
-        return window.location.origin;
-      }
     }
-    return vercelUrl;
+    return "https://haccp-test.vercel.app";
   };
 
-  // 현재 환경에 맞추어 로그인 불필요 공개 URL로 QR URL 초기화
+  // 기본 주소를 GitHub 연동 공식 도메인(https://haccp-test.vercel.app)으로 설정
   useEffect(() => {
+    try {
+      const saved = localStorage.getItem("saved_custom_qr_url");
+      if (saved && (saved.includes("ais-pre-") || saved.includes("ais-dev-"))) {
+        localStorage.removeItem("saved_custom_qr_url");
+      }
+    } catch {
+      // ignore storage errors
+    }
     setQrUrl(getPublicShareUrl());
   }, []);
 
@@ -388,23 +393,6 @@ export default function App() {
   // 단발성 Firestore 데이터 가져오기 헬퍼 (일반 수험생 및 새로고침용: 무료 플랜 소켓 연결 0개 소모)
   const fetchExamHistoryOnce = async () => {
     try {
-      // 150명 동시 접속 시 Firebase 50,000회 일일 읽기 할당량 보호: 최근 5분 이내 로컬 캐시가 있으면 수험생은 즉시 반환
-      const cached = localStorage.getItem("haccp_exam_history_admin");
-      const cacheTime = localStorage.getItem("haccp_exam_history_time");
-      const now = Date.now();
-      if (!isAdminMode && cached && cacheTime && now - parseInt(cacheTime, 10) < 5 * 60 * 1000) {
-        try {
-          const parsed = JSON.parse(cached);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            setExamHistory(parsed);
-            setIsHistoryLoaded(true);
-            return parsed;
-          }
-        } catch {
-          // ignore parsing error and continue to fetch
-        }
-      }
-
       const querySnapshot = await getDocs(collection(db, "exam_history"));
       const historyData: ExamHistory[] = [];
       querySnapshot.forEach((docSnap) => {
@@ -432,8 +420,13 @@ export default function App() {
       setExamHistory(historyData);
       setFirebaseError(null);
       setIsHistoryLoaded(true);
-      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(historyData));
-      localStorage.setItem("haccp_exam_history_time", now.toString());
+      if (historyData.length > 0) {
+        localStorage.setItem("haccp_exam_history_admin", JSON.stringify(historyData));
+        localStorage.setItem("haccp_exam_history_time", Date.now().toString());
+      } else {
+        localStorage.removeItem("haccp_exam_history_admin");
+        localStorage.removeItem("haccp_exam_history_time");
+      }
       return historyData;
     } catch (err: any) {
       console.warn("fetchExamHistoryOnce fallback error:", err);
@@ -502,7 +495,7 @@ export default function App() {
     return () => clearInterval(interval);
   }, [isTimerRunning, isSubmitted]);
 
-  // 3-1. Synchronize local examinee record with Firestore latest updates (e.g. reexam approval or record deletion)
+  // 3-1. Synchronize local examinee record with Firestore latest updates (e.g. reexam approval status or deletion)
   useEffect(() => {
     if (isHistoryLoaded && myLocalExamRecord) {
       const matched = examHistory.find(r => 
@@ -511,21 +504,90 @@ export default function App() {
         (r.name === myLocalExamRecord.name && r.dept === myLocalExamRecord.dept)
       );
 
-      // 관리자가 DB에서 이력을 리셋했거나 해당 응시자 기록을 삭제한 경우:
-      // 서버에 더 이상 기록이 없으므로 로컬 저장소의 이전 응시 기록도 자동 초기화하여 새 시험 응시 허용
-      if (!matched && !firebaseError) {
+      if (matched) {
+        // reexamApproved가 관리자/Firestore에서 승인(true)되었으면 로컬에 즉시 승인 반영
+        // 단, 이미 승인(true)된 로컬 상태를 이전(false) 상태로 강제 다운그레이드하지 않음
+        const shouldUpdateApproved = matched.reexamApproved && !myLocalExamRecord.reexamApproved;
+        const shouldUpdateScore = matched.score !== myLocalExamRecord.score;
+
+        if (shouldUpdateApproved || shouldUpdateScore) {
+          const updated = { 
+            ...myLocalExamRecord, 
+            ...matched,
+            reexamApproved: Boolean(myLocalExamRecord.reexamApproved || matched.reexamApproved)
+          };
+          setMyLocalExamRecord(updated);
+          localStorage.setItem("my_haccp_exam_record", JSON.stringify(updated));
+        }
+      } else if (examHistory.length === 0 && !isExamStarted) {
+        // 🚨 관리자가 전체 이력을 완전 초기화한 경우에만 로컬 상태 초기화 (시험 진행 중일 때는 절대 중단하지 않음)
         setMyLocalExamRecord(null);
         localStorage.removeItem("my_haccp_exam_record");
-        return;
-      }
-
-      if (matched && matched.reexamApproved !== myLocalExamRecord.reexamApproved) {
-        const updated = { ...myLocalExamRecord, reexamApproved: matched.reexamApproved };
-        setMyLocalExamRecord(updated);
-        localStorage.setItem("my_haccp_exam_record", JSON.stringify(updated));
+        localStorage.removeItem("haccp_examinee_info");
+        localStorage.removeItem("haccp_exam_answers");
+        localStorage.removeItem("haccp_user_records_map");
+        setIsSubmitted(false);
+        setIsExamStarted(false);
+        setIsReexamMode(false);
+        setAnswers({});
       }
     }
-  }, [examHistory, myLocalExamRecord, isHistoryLoaded, firebaseError]);
+  }, [examHistory, myLocalExamRecord, isHistoryLoaded, isExamStarted]);
+
+  // 3-2. 재시험 승인 대기 중인 응시자를 위한 실시간 승인 감지 백그라운드 폴링 (무료 플랜 소켓 절약형 단발 쿼리)
+  useEffect(() => {
+    if (isAdminMode) return;
+    // 시험 문제를 풀고 있는 도중(isExamStarted && !isSubmitted)일 때만 폴링 제외
+    if (isExamStarted && !isSubmitted) return;
+
+    const norm = (s?: string) => (s || "").replace(/\s+/g, "").trim().toLowerCase();
+    const candidateName = (myLocalExamRecord?.name || examinee.name || "").trim();
+    if (!candidateName) return;
+    const targetNorm = norm(candidateName);
+
+    // 이미 합격한 경우 폴링 불필요
+    if (myLocalExamRecord?.score && myLocalExamRecord.score >= passingScoreThreshold) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const q = query(collection(db, "exam_history"), where("name", "==", candidateName));
+        const snap = await getDocs(q);
+        let foundApproved = false;
+        snap.forEach((docSnap) => {
+          const d = docSnap.data();
+          if (d.reexamApproved) {
+            foundApproved = true;
+          }
+        });
+
+        if (!foundApproved) {
+          // 혹시 Firestore에 공백 차이가 있는 이름 매칭 확인
+          const allSnap = await getDocs(collection(db, "exam_history"));
+          allSnap.forEach(d => {
+            const data = d.data();
+            if (norm(data.name) === targetNorm && data.reexamApproved) {
+              foundApproved = true;
+            }
+          });
+        }
+
+        if (foundApproved) {
+          if (myLocalExamRecord && !myLocalExamRecord.reexamApproved) {
+            const updated = { ...myLocalExamRecord, reexamApproved: true };
+            setMyLocalExamRecord(updated);
+            localStorage.setItem("my_haccp_exam_record", JSON.stringify(updated));
+          }
+          setExamHistory(prev => prev.map(r => 
+            norm(r.name) === targetNorm ? { ...r, reexamApproved: true } : r
+          ));
+        }
+      } catch {
+        // ignore background poll errors
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [isAdminMode, isExamStarted, isSubmitted, myLocalExamRecord, examinee.name]);
 
   // 4. Score Calculation
   const correctCount = haccpQuestions.reduce((acc, q) => {
@@ -610,14 +672,20 @@ export default function App() {
 
       const firstScore = firstExam ? firstExam.score : 0;
       const firstPassed = firstScore >= passingScoreThreshold;
-      const isTargetForReexam = !firstPassed;
-      const isReexamApproved = !!(firstExam?.reexamApproved || rep.reexamApproved);
+      const isTargetForReexam = !firstPassed || (secondExam ? secondExam.score < passingScoreThreshold : false);
+      const isReexamApproved = personRecords.some(r => r.reexamApproved);
 
       let finalStatus: PersonExamSummary['finalStatus'] = 'reexam_pending';
       if (firstPassed) {
         finalStatus = '1st_passed';
       } else if (secondExam) {
-        finalStatus = secondExam.score >= passingScoreThreshold ? '2nd_passed' : '2nd_failed';
+        if (secondExam.score >= passingScoreThreshold) {
+          finalStatus = '2nd_passed';
+        } else if (isReexamApproved) {
+          finalStatus = 'reexam_ready';
+        } else {
+          finalStatus = '2nd_failed';
+        }
       } else if (isReexamApproved) {
         finalStatus = 'reexam_ready';
       } else {
@@ -649,16 +717,13 @@ export default function App() {
   // 5. Handlers
 
   // 재시험 시작 핸들러: 1차 시험과 100% 동일한 이름 및 부서로 자동 설정 및 고정
-  const handleStartReexam = (targetRecord?: ExamHistory) => {
-    setIsReexamMode(true);
-    setAnswers({});
-    setSecondsElapsed(0);
-    setIsSubmitted(false);
-    setShowTimeExpiredModal(false);
-    setCurrentCardIndex(0);
+  const handleStartReexam = (targetRecord?: ExamHistory | any) => {
+    // SyntheticEvent 방어 (React onClick 이벤트가 인자로 직접 전달되었을 경우 필터링)
+    const validTargetRecord = (targetRecord && typeof targetRecord === 'object' && 'name' in targetRecord && 'score' in targetRecord)
+      ? (targetRecord as ExamHistory)
+      : undefined;
 
-    // 1차 기록에서 성명과 소속 부서를 그대로 승계하여 바인딩
-    let base = targetRecord || myLocalExamRecord;
+    let base = validTargetRecord || myLocalExamRecord;
     if (!base && examinee.name.trim()) {
       base = examHistory.find(r => 
         (r.name || "").trim() === examinee.name.trim() && 
@@ -669,39 +734,54 @@ export default function App() {
       base = examHistory.find(r => (r.idNo || "").trim() === examinee.idNo.trim() && Boolean((r.name || "").trim()));
     }
 
-    if (base && (base.name || "").trim()) {
-      const fixedExaminee: ExamineeInfo = {
-        name: (base.name || "").trim(),
-        dept: (base.dept || "").trim() || "품질보증팀",
-        idNo: base.idNo || examinee.idNo,
-        date: getTodayDateString()
-      };
-      setExaminee(fixedExaminee);
-      localStorage.setItem("haccp_examinee_info", JSON.stringify(fixedExaminee));
-    } else {
-      setExaminee(prev => ({ ...prev, date: getTodayDateString() }));
-    }
+    const cleanName = base ? (base.name || "").trim() : (examinee.name || "").trim();
+    const cleanDept = base ? ((base.dept || "").trim() || "품질보증팀") : ((examinee.dept || "").trim() || "품질보증팀");
+    const cleanIdNo = base?.idNo || examinee.idNo;
+
+    const fixedExaminee: ExamineeInfo = {
+      name: cleanName,
+      dept: cleanDept,
+      idNo: cleanIdNo,
+      date: getTodayDateString()
+    };
+    setExaminee(fixedExaminee);
+    localStorage.setItem("haccp_examinee_info", JSON.stringify(fixedExaminee));
+
+    setIsReexamMode(true);
+    setAnswers({});
+    setSecondsElapsed(0);
+    setIsSubmitted(false);
+    setShowTimeExpiredModal(false);
+    setShowOMRModalMobile(false);
+    setCurrentCardIndex(0);
 
     // 문제 세팅
     setShuffledQuestions(haccpQuestions);
     setIsExamStarted(true);
     setIsTimerRunning(true);
     setStartExamError(null);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // 관리자 모드: 재시험 승인 / 승인 취소 토글
-  const handleToggleReexamApproval = async (record: ExamHistory) => {
-    const newApproved = !record.reexamApproved;
+  // 관리자 모드: 재시험 승인 / 승인 취소 토글 (forcedApprovedState로 명시적 상태 전달 가능)
+  const handleToggleReexamApproval = async (record: ExamHistory, forcedApprovedState?: boolean) => {
+    const newApproved = forcedApprovedState !== undefined ? forcedApprovedState : !record.reexamApproved;
     const actionText = newApproved ? "품질보증팀 재시험 승인" : "재시험 승인 취소";
     const targetKey = record.id || record.idNo || `${record.name}-${record.dept}`;
     setApprovalActionLoading(targetKey);
+
+    const norm = (s?: string) => (s || "").replace(/\s+/g, "").trim().toLowerCase();
+    const cleanName = (record.name || "").trim();
+    const cleanDept = (record.dept || "").trim();
+    const cleanIdNo = (record.idNo || "").trim();
+    const targetNormName = norm(cleanName);
 
     try {
       // 1. 로컬 상태 즉시 낙관적 업데이트 (UI 지연 및 블로킹 방지)
       const updatedHistory = examHistory.map(r => {
         const isMatch = (record.id && r.id === record.id) ||
-                        (record.idNo && r.idNo === record.idNo) ||
-                        (r.name === record.name && r.dept === record.dept && (!r.round || r.round === 1));
+                        (cleanIdNo && (r.idNo || "").trim() === cleanIdNo) ||
+                        (cleanName && norm(r.name) === targetNormName);
         if (isMatch) {
           return { ...r, reexamApproved: newApproved };
         }
@@ -713,26 +793,67 @@ export default function App() {
       // 2. 현재 로그인/접속 응시자의 로컬 기록과 일치할 경우 함께 업데이트
       if (myLocalExamRecord && (
         (record.id && myLocalExamRecord.id === record.id) || 
-        (record.idNo && myLocalExamRecord.idNo === record.idNo) || 
-        (record.name === myLocalExamRecord.name && record.dept === myLocalExamRecord.dept)
+        (cleanIdNo && (myLocalExamRecord.idNo || "").trim() === cleanIdNo) || 
+        (cleanName && norm(myLocalExamRecord.name) === targetNormName)
       )) {
         const updatedMy = { ...myLocalExamRecord, reexamApproved: newApproved };
         setMyLocalExamRecord(updatedMy);
         localStorage.setItem("my_haccp_exam_record", JSON.stringify(updatedMy));
       }
 
-      // 3. Firestore 원격 데이터베이스에 승인 플래그 업데이트
-      if (record.id) {
-        try {
-          await updateDoc(doc(db, "exam_history", record.id), {
-            reexamApproved: newApproved
-          });
-        } catch (dbErr: any) {
-          console.warn("Firestore 승인 플래그 업데이트 중 오류 (로컬 상태는 보존됨):", dbErr);
+      // 3. 로컬 사용자 맵(haccp_user_records_map)도 동기화하여 재시험 게이트웨이 즉시 통과 지원
+      try {
+        const userMapStr = localStorage.getItem("haccp_user_records_map");
+        if (userMapStr) {
+          const userMap = JSON.parse(userMapStr);
+          if (cleanName && userMap[cleanName]) {
+            userMap[cleanName].reexamApproved = newApproved;
+          }
+          if (cleanName && userMap[`${cleanName}_${cleanDept}`]) {
+            userMap[`${cleanName}_${cleanDept}`].reexamApproved = newApproved;
+          }
+          localStorage.setItem("haccp_user_records_map", JSON.stringify(userMap));
         }
+      } catch (mapErr) {
+        console.warn("로컬 사용자 맵 업데이트 중 오류:", mapErr);
       }
 
-      setReexamApprovalToast(`[품질보증팀] ${record.name} (${record.dept}) 님의 ${actionText} 처리가 완료되었습니다.`);
+      // 4. Firestore 원격 데이터베이스에 해당 응시자의 모든 문서에 승인 플래그 확실하게 동기화 저장
+      try {
+        const docsToUpdate = new Set<string>();
+        if (record.id) docsToUpdate.add(record.id);
+
+        if (cleanName) {
+          const q = query(collection(db, "exam_history"), where("name", "==", cleanName));
+          const snap = await getDocs(q);
+          snap.forEach(d => docsToUpdate.add(d.id));
+        }
+
+        if (cleanIdNo) {
+          const qId = query(collection(db, "exam_history"), where("idNo", "==", cleanIdNo));
+          const snapId = await getDocs(qId);
+          snapId.forEach(d => docsToUpdate.add(d.id));
+        }
+
+        // 전체 컬렉션에서 혹시 공백 차이가 있는 이름 매칭 확인
+        const allSnap = await getDocs(collection(db, "exam_history"));
+        allSnap.forEach(d => {
+          const data = d.data();
+          if ((cleanName && norm(data.name) === targetNormName) || (cleanIdNo && (data.idNo || "").trim() === cleanIdNo)) {
+            docsToUpdate.add(d.id);
+          }
+        });
+
+        // Promise.all로 모든 일치 문서 확실하게 병렬 업데이트 완료 대기!
+        const updatePromises = Array.from(docsToUpdate).map(docId =>
+          updateDoc(doc(db, "exam_history", docId), { reexamApproved: newApproved })
+        );
+        await Promise.all(updatePromises);
+      } catch (dbErr: any) {
+        console.warn("Firestore 승인 플래그 업데이트 중 오류 (로컬 상태는 보존됨):", dbErr);
+      }
+
+      setReexamApprovalToast(`[품질보증팀] ${cleanName || record.name} 님의 ${actionText} 처리가 완료되었습니다.`);
       setTimeout(() => setReexamApprovalToast(null), 3500);
     } catch (err: any) {
       console.error("Failed to update reexam approval:", err);
@@ -743,85 +864,283 @@ export default function App() {
     }
   };
 
-  const handleStartExam = (e: React.FormEvent) => {
+  // 관리자 모드: 재시험 승인 대기자 전원 일괄 승인
+  const handleBulkApproveReexam = async () => {
+    const pendingRecords = examHistory.filter(r => r.score < passingScoreThreshold && !r.reexamApproved);
+    if (pendingRecords.length === 0) {
+      showAdminToast("현재 재시험 승인 대기 중인 응시자가 없습니다.", "info");
+      return;
+    }
+
+    setApprovalActionLoading("bulk_all");
+    try {
+      // 1. 로컬 상태 즉시 일괄 승인 반영
+      const updatedHistory = examHistory.map(r => {
+        if (r.score < passingScoreThreshold) {
+          return { ...r, reexamApproved: true };
+        }
+        return r;
+      });
+      setExamHistory(updatedHistory);
+      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
+
+      // 2. 현재 로그인 사용자 기록 일치 시 승인 반영
+      if (myLocalExamRecord && myLocalExamRecord.score < passingScoreThreshold) {
+        const upd = { ...myLocalExamRecord, reexamApproved: true };
+        setMyLocalExamRecord(upd);
+        localStorage.setItem("my_haccp_exam_record", JSON.stringify(upd));
+      }
+
+      // 3. Firestore 원격 데이터베이스에 70점 미만 모든 문서 일괄 업데이트
+      const allSnap = await getDocs(collection(db, "exam_history"));
+      const docIdsToUpdate: string[] = [];
+      allSnap.forEach(d => {
+        const data = d.data();
+        if (data.score < passingScoreThreshold && !data.reexamApproved) {
+          docIdsToUpdate.push(d.id);
+        }
+      });
+
+      const promises = docIdsToUpdate.map(id => 
+        updateDoc(doc(db, "exam_history", id), { reexamApproved: true })
+      );
+      await Promise.all(promises);
+
+      showAdminToast(`[품질보증팀] 재시험 대상자 총 ${pendingRecords.length}명 전원에 대한 재시험 승인이 완료되었습니다!`, "success");
+    } catch (err: any) {
+      console.error("일괄 승인 실패:", err);
+      showAdminToast("일괄 승인 처리 중 일부 오류가 발생했습니다.", "error");
+    } finally {
+      setApprovalActionLoading(null);
+    }
+  };
+
+  const handleStartExam = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!examinee.name.trim() || !examinee.dept.trim()) {
+    const cleanName = (examinee.name || "").trim();
+    const cleanDept = (examinee.dept || "").trim();
+
+    if (!cleanName || !cleanDept) {
       setStartExamError("성명과 소속을 모두 입력해 주세요.");
       return;
     }
 
-    // Check all previous records of this examinee
-    const userRecords = examHistory.filter(r => 
-      r.name.trim() === examinee.name.trim() && r.dept.trim() === examinee.dept.trim()
-    );
+    setIsVerifyingExaminee(true);
+    setStartExamError(null);
 
-    if (userRecords.length > 0) {
-      // 1차 기록과 2차 기록 구분
-      const firstRecord = userRecords.find(r => (!r.round || r.round === 1) && !r.isReexam);
-      const secondRecord = userRecords.find(r => r.round === 2 || r.isReexam);
+    // 공백 무시 및 소문자 정규화 헬퍼 (예: "홍길동" vs "홍 길 동")
+    const norm = (s?: string) => (s || "").replace(/\s+/g, "").trim().toLowerCase();
+    const targetNormName = norm(cleanName);
 
-      // 이미 2차 재시험까지 모두 마친 경우
-      if (secondRecord) {
-        setMyLocalExamRecord(secondRecord);
-        localStorage.setItem("my_haccp_exam_record", JSON.stringify(secondRecord));
-        if (secondRecord.score >= passingScoreThreshold) {
-          setStartExamError(`이미 ${secondRecord.name}님은 2차 재시험에서 ${secondRecord.score}점으로 최종 합격하셨습니다.`);
-        } else {
-          setStartExamError(`${secondRecord.name}님은 1차(${firstRecord?.score ?? '-'}점) 및 2차 재시험(${secondRecord.score}점)을 모두 완료하셨습니다. 추가 조치는 품질보증팀에 문의해주세요.`);
+    try {
+      // 1. Firestore 실시간 쿼리로 해당 응시자의 최신 시험 기록 즉시 확인
+      const userRecords: ExamHistory[] = [];
+      try {
+        const q = query(
+          collection(db, "exam_history"),
+          where("name", "==", cleanName)
+        );
+        const querySnap = await getDocs(q);
+        querySnap.forEach((docSnap) => {
+          const d = docSnap.data();
+          userRecords.push({
+            id: docSnap.id,
+            ...d,
+            name: (d.name || "").trim(),
+            dept: (d.dept || "").trim()
+          } as ExamHistory);
+        });
+
+        // 만약 공백 차이 등으로 정확 매칭이 안 잡힌 경우, 전체 컬렉션에서 정규화 매칭 확인
+        if (userRecords.length === 0) {
+          const allSnap = await getDocs(collection(db, "exam_history"));
+          allSnap.forEach((docSnap) => {
+            const d = docSnap.data();
+            if (norm(d.name) === targetNormName) {
+              userRecords.push({
+                id: docSnap.id,
+                ...d,
+                name: (d.name || "").trim(),
+                dept: (d.dept || "").trim()
+              } as ExamHistory);
+            }
+          });
         }
-        return;
+      } catch (dbErr) {
+        console.warn("Firestore 응시 기록 실시간 조회 실패, 로컬 기록으로 확인:", dbErr);
       }
 
-      // 1차 기록만 있는 경우
-      if (firstRecord) {
-        if (firstRecord.score >= passingScoreThreshold) {
-          setStartExamError(`이미 ${firstRecord.name}님은 ${firstRecord.score}점으로 최종 합격하셨습니다. 재응시 대상이 아닙니다.`);
-          setMyLocalExamRecord(firstRecord);
-          localStorage.setItem("my_haccp_exam_record", JSON.stringify(firstRecord));
-          return;
-        } else {
-          // 70점 미만 (재평가 또는 재교육+재평가 대상자)
-          if (!firstRecord.reexamApproved) {
-            const needRetrain = firstRecord.score < 50;
-            setStartExamError(
-              needRetrain 
-                ? `${firstRecord.name}님은 1차 평가 점수(${firstRecord.score}점)로 [재교육+재평가] 대상자입니다. 품질보증팀의 재교육 이수 및 승인 완료 후에만 재시험 응시가 가능합니다.`
-                : `${firstRecord.name}님은 1차 평가 점수(${firstRecord.score}점)로 [재평가] 대상자입니다. 품질보증팀의 승인 완료 후에만 재시험 응시가 가능합니다.`
-            );
-            setMyLocalExamRecord(firstRecord);
-            localStorage.setItem("my_haccp_exam_record", JSON.stringify(firstRecord));
-            return;
-          } else {
-            // 관리자 승인이 완료된 재시험 대상자! 1차 시험 결과는 안전하게 보존한 채 2차 재시험 시작
-            setMyLocalExamRecord(firstRecord);
-            localStorage.setItem("my_haccp_exam_record", JSON.stringify(firstRecord));
-            localStorage.setItem("haccp_examinee_info", JSON.stringify(examinee));
-            handleStartReexam();
-            return;
+      // 2. 현재 로컬 상태 및 캐시된 이력과 병합 (누락 방지)
+      examHistory.forEach(r => {
+        if (norm(r.name) === targetNormName && !userRecords.some(ur => ur.id && ur.id === r.id)) {
+          userRecords.push(r);
+        }
+      });
+
+      // 로컬 스토리지 관리자 이력 확인
+      try {
+        const cachedAdmin = localStorage.getItem("haccp_exam_history_admin");
+        if (cachedAdmin) {
+          const parsed = JSON.parse(cachedAdmin);
+          if (Array.isArray(parsed)) {
+            parsed.forEach((r: ExamHistory) => {
+              if (norm(r.name) === targetNormName && !userRecords.some(ur => ur.id && ur.id === r.id)) {
+                userRecords.push(r);
+              }
+            });
           }
         }
+      } catch {
+        // ignore
       }
-    }
 
-    setStartExamError(null);
-    setIsReexamMode(false);
-    const todayDate = getTodayDateString();
-    const updatedExaminee = {
-      ...examinee,
-      date: todayDate
-    };
-    setExaminee(updatedExaminee);
-    // Save info to local storage
-    localStorage.setItem("haccp_examinee_info", JSON.stringify(updatedExaminee));
-    
-    // Reset answers and timer
-    setAnswers({});
-    setSecondsElapsed(0);
-    setIsSubmitted(false);
-    setCurrentCardIndex(0);
-    setShuffledQuestions(haccpQuestions);
-    setIsExamStarted(true);
-    setIsTimerRunning(true);
+      // 로컬 스토리지 본인 이력 확인 (단, 이력이 로드된 상태에서 실제 데이터베이스에 남아있는 경우만 유효)
+      try {
+        const mySaved = localStorage.getItem("my_haccp_exam_record");
+        if (mySaved) {
+          const parsedMy = JSON.parse(mySaved);
+          if (parsedMy && norm(parsedMy.name) === targetNormName) {
+            const stillExists = examHistory.some(h => 
+              (parsedMy.id && h.id === parsedMy.id) ||
+              (parsedMy.idNo && h.idNo === parsedMy.idNo) ||
+              (norm(h.name) === targetNormName && (!parsedMy.dept || !h.dept || h.dept === parsedMy.dept))
+            );
+            if (stillExists || !isHistoryLoaded) {
+              if (!userRecords.some(ur => (ur.id && ur.id === parsedMy.id) || (ur.date === parsedMy.date && ur.score === parsedMy.score))) {
+                userRecords.push(parsedMy);
+              }
+            } else {
+              // 데이터베이스에서 삭제/초기화되었으므로 로컬 스토리지 정리
+              localStorage.removeItem("my_haccp_exam_record");
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+
+      // 로컬 스토리지 영구 응시자 맵 확인 (단, 데이터베이스에 실제 남아있는 경우만 유효)
+      try {
+        const userMapStr = localStorage.getItem("haccp_user_records_map");
+        if (userMapStr) {
+          const userMap = JSON.parse(userMapStr);
+          const mapped = userMap[cleanName] || userMap[`${cleanName}_${cleanDept}`];
+          if (mapped) {
+            const stillExists = examHistory.some(h => 
+              (mapped.id && h.id === mapped.id) ||
+              (mapped.idNo && h.idNo === mapped.idNo) ||
+              (norm(h.name) === targetNormName && (!mapped.dept || !h.dept || h.dept === mapped.dept))
+            );
+            if (stillExists || !isHistoryLoaded) {
+              if (!userRecords.some(ur => (ur.id && ur.id === mapped.id) || (ur.date === mapped.date && ur.score === mapped.score))) {
+                userRecords.push(mapped);
+              }
+            } else {
+              // 초기화되었으므로 제거
+              delete userMap[cleanName];
+              delete userMap[`${cleanName}_${cleanDept}`];
+              localStorage.setItem("haccp_user_records_map", JSON.stringify(userMap));
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+
+      if (userRecords.length > 0) {
+        // 최신 기록 순으로 정렬
+        userRecords.sort((a, b) => {
+          const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.date ? new Date(a.date).getTime() : 0);
+          const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.date ? new Date(b.date).getTime() : 0);
+          return timeB - timeA;
+        });
+
+        // 1) 이미 합격한 경우
+        const passedRecord = userRecords.find(r => r.score >= passingScoreThreshold);
+        if (passedRecord) {
+          setMyLocalExamRecord(passedRecord);
+          localStorage.setItem("my_haccp_exam_record", JSON.stringify(passedRecord));
+          setStartExamError(`이미 ${cleanName}님은 ${passedRecord.score}점으로 최종 합격하셨습니다. 추가 응시 대상이 아닙니다.`);
+          setIsVerifyingExaminee(false);
+          return;
+        }
+
+        // 2) 관리자(품질보증팀)의 재시험 승인 여부 포괄 검증 (성명 일치 기준 100% 매칭)
+        const isCandidateReexamApproved = Boolean(
+          userRecords.some(r => r.reexamApproved) || 
+          examHistory.some(r => norm(r.name) === targetNormName && r.reexamApproved) ||
+          (myLocalExamRecord && norm(myLocalExamRecord.name) === targetNormName && myLocalExamRecord.reexamApproved)
+        );
+
+        // 가장 최근의 미달 평가 기록 선택
+        const secondRecord = userRecords.find(r => r.round === 2 || r.isReexam);
+        const firstRecord = userRecords.find(r => (!r.round || r.round === 1) && !r.isReexam) || userRecords[0];
+        const latestFailedRecord = secondRecord || firstRecord || userRecords[0];
+
+        if (isCandidateReexamApproved) {
+          // ✅ 관리자 승인이 완료된 재시험 대상자! 2차 재시험 모드로 즉시 진입
+          const approvedRec = { ...latestFailedRecord, reexamApproved: true };
+          setMyLocalExamRecord(approvedRec);
+          localStorage.setItem("my_haccp_exam_record", JSON.stringify(approvedRec));
+
+          // examHistory 로컬 상태도 함께 reexamApproved: true로 동기화 (stale 상태로 인한 롤백 방지)
+          setExamHistory(prev => prev.map(r => 
+            norm(r.name) === targetNormName ? { ...r, reexamApproved: true } : r
+          ));
+
+          setIsVerifyingExaminee(false);
+          handleStartReexam(approvedRec);
+          return;
+        }
+
+        // 3) 관리자 미승인 상태에서 2차 재시험까지 이미 모두 완료한 경우
+        if (secondRecord) {
+          setMyLocalExamRecord(secondRecord);
+          localStorage.setItem("my_haccp_exam_record", JSON.stringify(secondRecord));
+          setStartExamError(`${cleanName}님은 1차(${firstRecord?.score ?? '-'}점) 및 2차 재시험(${secondRecord.score}점)을 모두 완료하셨습니다. 추가 조치는 품질보증팀에 문의해주세요.`);
+          setIsVerifyingExaminee(false);
+          return;
+        }
+
+        // 4) 1차 평가 결과 불합격이고 관리자 미승인인 경우: 절대 재응시 불가 및 안내 표시
+        if (firstRecord) {
+          setMyLocalExamRecord(firstRecord);
+          localStorage.setItem("my_haccp_exam_record", JSON.stringify(firstRecord));
+          const needRetrain = firstRecord.score < 50;
+          setStartExamError(
+            needRetrain 
+              ? `${cleanName}님은 1차 평가 점수(${firstRecord.score}점)로 [재교육+재평가] 대상자입니다. 관리자(품질보증팀)의 재교육 확인 및 승인 완료 후에만 재시험 응시가 가능합니다.`
+              : `${cleanName}님은 1차 평가 점수(${firstRecord.score}점)로 [재평가] 대상자입니다. 관리자(품질보증팀)의 승인 완료 후에만 재시험 응시가 가능합니다.`
+          );
+          setIsVerifyingExaminee(false);
+          return;
+        }
+      }
+
+      // 4. 신규 최초 응시자인 경우 정상 시험 시작
+      setStartExamError(null);
+      setIsReexamMode(false);
+      const todayDate = getTodayDateString();
+      const updatedExaminee = {
+        ...examinee,
+        name: cleanName,
+        dept: cleanDept,
+        date: todayDate
+      };
+      setExaminee(updatedExaminee);
+      localStorage.setItem("haccp_examinee_info", JSON.stringify(updatedExaminee));
+      
+      // Reset answers and timer
+      setAnswers({});
+      setSecondsElapsed(0);
+      setIsSubmitted(false);
+      setCurrentCardIndex(0);
+      setShuffledQuestions(haccpQuestions);
+      setIsExamStarted(true);
+      setIsTimerRunning(true);
+    } finally {
+      setIsVerifyingExaminee(false);
+    }
   };
 
   const handleSelectAnswer = (questionId: number, optionIndex: number) => {
@@ -844,6 +1163,9 @@ export default function App() {
     
     const dateStr = getTodayDateString();
     const currentYear = new Date().getFullYear();
+    const cleanName = (examinee.name || "").trim();
+    const cleanDept = (examinee.dept || "").trim();
+    const cleanIdNo = (examinee.idNo || "").trim() || `HS-${currentYear}-${Math.floor(1000 + Math.random() * 9000)}`;
     
     // Add to history in Firestore
     const newRecord: ExamHistory = {
@@ -851,14 +1173,14 @@ export default function App() {
       year: currentYear,
       score: finalScore,
       passed: finalScore >= passingScoreThreshold,
-      name: examinee.name,
-      dept: examinee.dept,
-      idNo: examinee.idNo,
+      name: cleanName,
+      dept: cleanDept,
+      idNo: cleanIdNo,
       answers: { ...answers },
       createdAt: Timestamp.now(),
-      isReexam: isReexamMode,
+      isReexam: Boolean(isReexamMode),
       round: isReexamMode ? 2 : 1,
-      reexamApproved: false // 응시 완료 후 승인 소진
+      reexamApproved: false // 응시 완료 후 기본 상태: 재시험 시 반드시 관리자 승인 필요
     };
     
     try {
@@ -868,7 +1190,7 @@ export default function App() {
       // 만약 재시험이었다면 이전 레코드의 reexamApproved도 false로 소진 처리
       if (isReexamMode) {
         const prevRecord = examHistory.find(r => 
-          ((r.idNo && r.idNo === examinee.idNo) || (r.name === examinee.name && r.dept === examinee.dept)) && r.id !== docRef.id
+          ((r.idNo && r.idNo === cleanIdNo) || (r.name === cleanName && r.dept === cleanDept)) && r.id !== docRef.id
         );
         if (prevRecord && prevRecord.id) {
           try {
@@ -880,6 +1202,11 @@ export default function App() {
           }
         }
       }
+
+      // ⭐️ 제출 완료 즉시 로컬 기록 상태 및 스토리지에 동기화 반영
+      const updatedHistory = [newRecord, ...examHistory.filter(r => r.id !== newRecord.id)];
+      setExamHistory(updatedHistory);
+      localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
     } catch (e: any) {
       console.error("Error adding document: ", e);
       if (e.code === 'permission-denied') {
@@ -896,6 +1223,17 @@ export default function App() {
     // Save to local state and storage
     setMyLocalExamRecord(newRecord);
     localStorage.setItem("my_haccp_exam_record", JSON.stringify(newRecord));
+
+    // 영구 사용자 맵에 저장하여 재시험 게이트웨이에서 즉시 탐지 가능하도록 보장
+    try {
+      const userMapStr = localStorage.getItem("haccp_user_records_map") || "{}";
+      const userMap = JSON.parse(userMapStr);
+      userMap[cleanName] = newRecord;
+      userMap[`${cleanName}_${cleanDept}`] = newRecord;
+      localStorage.setItem("haccp_user_records_map", JSON.stringify(userMap));
+    } catch {
+      // ignore
+    }
     
     // Scroll to top to see result
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1021,26 +1359,60 @@ export default function App() {
           // 3. 로컬 스토리지 및 로컬 상태 일괄 완전 초기화
           setExamHistory([]);
           localStorage.removeItem("haccp_exam_history_admin");
+          localStorage.removeItem("haccp_exam_history_time");
           setMyLocalExamRecord(null);
           localStorage.removeItem("my_haccp_exam_record");
           localStorage.removeItem("haccp_examinee_info");
           localStorage.removeItem("haccp_exam_answers");
+          localStorage.removeItem("haccp_user_records_map");
           setAnswers({});
           setIsSubmitted(false);
+          setIsExamStarted(false);
+          setIsReexamMode(false);
+          setSecondsElapsed(0);
+          setIsTimerRunning(false);
+          setShowTimeExpiredModal(false);
+          setShowOMRModalMobile(false);
+          setCurrentCardIndex(0);
+          setStartExamError(null);
+          setExaminee({
+            name: "",
+            dept: "",
+            idNo: `HS-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`,
+            date: getTodayDateString()
+          });
 
           if (failCount > 0) {
             showAdminToast(`전체 이력이 초기화되었습니다. (${deletedCount}건 삭제 완료)`, "success");
           } else {
-            showAdminToast("모든 응시 이력이 성공적으로 완전 초기화되었습니다.", "success");
+            showAdminToast("모든 응시 이력이 성공적으로 완전 초기화되었습니다. 즉시 재시험이 가능합니다.", "success");
           }
         } catch (e: any) {
           console.error("전체 이력 초기화 오류: ", e);
           setExamHistory([]);
           setMyLocalExamRecord(null);
           localStorage.removeItem("haccp_exam_history_admin");
+          localStorage.removeItem("haccp_exam_history_time");
           localStorage.removeItem("my_haccp_exam_record");
           localStorage.removeItem("haccp_examinee_info");
           localStorage.removeItem("haccp_exam_answers");
+          localStorage.removeItem("haccp_user_records_map");
+          setAnswers({});
+          setIsSubmitted(false);
+          setIsExamStarted(false);
+          setIsReexamMode(false);
+          setSecondsElapsed(0);
+          setIsTimerRunning(false);
+          setShowTimeExpiredModal(false);
+          setShowOMRModalMobile(false);
+          setCurrentCardIndex(0);
+          setStartExamError(null);
+          setExaminee({
+            name: "",
+            dept: "",
+            idNo: `HS-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`,
+            date: getTodayDateString()
+          });
           showAdminToast("로컬 저장소가 즉시 완전 초기화되었습니다.", "success");
         } finally {
           setIsClearingHistory(false);
@@ -1087,6 +1459,18 @@ export default function App() {
           localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updated));
 
           // 3. 만약 현재 접속 기기의 시험 기록과 동일한 경우 본인 로컬 기록도 함께 제거
+          try {
+            const userMapStr = localStorage.getItem("haccp_user_records_map");
+            if (userMapStr) {
+              const userMap = JSON.parse(userMapStr);
+              if (record.name) delete userMap[record.name.trim()];
+              if (record.name && record.dept) delete userMap[`${record.name.trim()}_${record.dept.trim()}`];
+              localStorage.setItem("haccp_user_records_map", JSON.stringify(userMap));
+            }
+          } catch {
+            // ignore
+          }
+
           if (myLocalExamRecord) {
             const isSelf = 
               (record.id && myLocalExamRecord.id === record.id) ||
@@ -1098,6 +1482,10 @@ export default function App() {
               localStorage.removeItem("my_haccp_exam_record");
               localStorage.removeItem("haccp_examinee_info");
               localStorage.removeItem("haccp_exam_answers");
+              setIsSubmitted(false);
+              setIsExamStarted(false);
+              setIsReexamMode(false);
+              setAnswers({});
             }
           }
 
@@ -1176,7 +1564,19 @@ export default function App() {
           setExamHistory(updatedHistory);
           localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
 
-          // 3. 본인 기기의 기록인 경우 로컬 기록도 완전 초기화
+          // 3. 본인 기기의 기록인 경우 로컬 기록도 완전 초기화 및 영구 응시자 맵 정리
+          try {
+            const userMapStr = localStorage.getItem("haccp_user_records_map");
+            if (userMapStr) {
+              const userMap = JSON.parse(userMapStr);
+              if (person.name) delete userMap[person.name.trim()];
+              if (person.name && person.dept) delete userMap[`${person.name.trim()}_${person.dept.trim()}`];
+              localStorage.setItem("haccp_user_records_map", JSON.stringify(userMap));
+            }
+          } catch {
+            // ignore
+          }
+
           if (myLocalExamRecord) {
             const myName = (myLocalExamRecord.name || "").trim();
             const myDept = (myLocalExamRecord.dept || "").trim();
@@ -1191,6 +1591,10 @@ export default function App() {
               localStorage.removeItem("my_haccp_exam_record");
               localStorage.removeItem("haccp_examinee_info");
               localStorage.removeItem("haccp_exam_answers");
+              setIsSubmitted(false);
+              setIsExamStarted(false);
+              setIsReexamMode(false);
+              setAnswers({});
             }
           }
 
@@ -2273,10 +2677,21 @@ export default function App() {
     setIsSubmitted(false);
     setIsReexamMode(false);
     setAnswers({});
-    setExaminee(prev => ({
-      ...prev,
-      name: "" // Ensure name is cleared/blank when returning to start screen
-    }));
+    setSecondsElapsed(0);
+    setIsTimerRunning(false);
+    setShowTimeExpiredModal(false);
+    setShowOMRModalMobile(false);
+    setCurrentCardIndex(0);
+    setStartExamError(null);
+    if (myLocalExamRecord) {
+      setExaminee(prev => ({
+        ...prev,
+        name: myLocalExamRecord.name || prev.name,
+        dept: myLocalExamRecord.dept || prev.dept,
+        idNo: myLocalExamRecord.idNo || prev.idNo
+      }));
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   // Format Time
@@ -2413,7 +2828,16 @@ export default function App() {
                   </div>
                 </div>
                 <button
-                  onClick={() => setIsAdminMode(false)}
+                  onClick={() => {
+                    setIsAdminMode(false);
+                    // 전체 이력이 초기화되었거나 로컬 기록이 없으면 첫 화면(초기 응시 화면)으로 복귀
+                    if (examHistory.length === 0 || !myLocalExamRecord) {
+                      setIsExamStarted(false);
+                      setIsSubmitted(false);
+                      setIsReexamMode(false);
+                      setMyLocalExamRecord(null);
+                    }
+                  }}
                   className="px-4 py-2 bg-stone-800 hover:bg-stone-700 text-stone-200 border border-stone-700 text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 self-start md:self-center"
                 >
                   <ChevronLeft size={14} />
@@ -2493,12 +2917,23 @@ service cloud.firestore {
                         </div>
                       </div>
                     </div>
-                    <button
-                      onClick={() => setStatusFilter('reexam_pending')}
-                      className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer shrink-0 shadow-2xs"
-                    >
-                      대기자 목록 및 승인하기
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        disabled={approvalActionLoading === "bulk_all"}
+                        onClick={handleBulkApproveReexam}
+                        className="px-3.5 py-1.5 bg-[#0F5A3E] hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-all cursor-pointer shadow-xs flex items-center gap-1.5"
+                        title="재시험 대기 중인 모든 응시자를 한 번에 즉시 승인합니다."
+                      >
+                        <CheckCircle2 size={14} />
+                        {approvalActionLoading === "bulk_all" ? "일괄 승인 중..." : "재시험 대상자 전원 일괄 승인"}
+                      </button>
+                      <button
+                        onClick={() => setStatusFilter('reexam_pending')}
+                        className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer shadow-2xs"
+                      >
+                        대기자 목록 보기
+                      </button>
+                    </div>
                   </div>
                 );
               }
@@ -3011,20 +3446,67 @@ service cloud.firestore {
                                     </div>
 
                                     {has2nd ? (
-                                      <div className="space-y-1.5 text-xs text-stone-600">
-                                        <div className="flex justify-between items-baseline">
-                                          <span className="text-stone-500">재시험 점수:</span>
-                                          <span className="font-mono text-base font-bold text-stone-900">
-                                            {person.secondExam?.score}점
-                                            <span className="text-xs font-normal text-stone-500 ml-1">
-                                              ({Math.round((person.secondExam?.score || 0) / 5)} / 20문항 정답)
+                                      <div className="space-y-2 text-xs text-stone-600">
+                                        <div className="space-y-1.5">
+                                          <div className="flex justify-between items-baseline">
+                                            <span className="text-stone-500">재시험 점수:</span>
+                                            <span className="font-mono text-base font-bold text-stone-900">
+                                              {person.secondExam?.score}점
+                                              <span className="text-xs font-normal text-stone-500 ml-1">
+                                                ({Math.round((person.secondExam?.score || 0) / 5)} / 20문항 정답)
+                                              </span>
                                             </span>
-                                          </span>
+                                          </div>
+                                          <div className="flex justify-between items-center text-[11px] text-stone-500">
+                                            <span>재시험 일자:</span>
+                                            <span>{person.secondExam?.date}</span>
+                                          </div>
                                         </div>
-                                        <div className="flex justify-between items-center text-[11px] text-stone-500">
-                                          <span>재시험 일자:</span>
-                                          <span>{person.secondExam?.date}</span>
-                                        </div>
+
+                                        {/* 2차 재시험에서도 70점 미달인 경우 추가 승인 조치 영역 */}
+                                        {person.secondExam!.score < passingScoreThreshold && (
+                                          <div className="space-y-2 pt-2 border-t border-red-150">
+                                            <p className="text-xs text-stone-600">
+                                              {person.isReexamApproved 
+                                                ? '품질보증팀 추가 재시험 승인이 완료되었습니다.' 
+                                                : '2차 재시험 기준 미달 인원입니다. 품질보증팀 확인 후 추가 재시험을 승인할 수 있습니다.'}
+                                            </p>
+                                            <div className="flex flex-col gap-2">
+                                              <button
+                                                disabled={approvalActionLoading === (person.secondExam!.id || person.secondExam!.idNo || person.name)}
+                                                onClick={() => handleToggleReexamApproval(person.secondExam!, !person.isReexamApproved)}
+                                                className={`w-full py-2 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+                                                  person.isReexamApproved
+                                                    ? 'bg-stone-200 hover:bg-red-50 text-stone-700 hover:text-red-600 border border-stone-300'
+                                                    : 'bg-[#0F5A3E] hover:bg-emerald-800 text-white shadow-xs'
+                                                }`}
+                                              >
+                                                {person.isReexamApproved ? (
+                                                  <>승인 취소하기</>
+                                                ) : (
+                                                  <>
+                                                    <CheckCircle2 size={14} />
+                                                    품질보증팀 추가 재시험 승인
+                                                  </>
+                                                )}
+                                              </button>
+                                              {person.isReexamApproved && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() => {
+                                                    setIsAdminMode(false);
+                                                    handleStartReexam(person.secondExam || person.firstExam || undefined);
+                                                  }}
+                                                  className="w-full py-2 px-3 rounded-lg text-xs font-bold bg-[#0F5A3E] hover:bg-emerald-800 text-white transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs active:scale-98"
+                                                  title={`${person.name} 님의 재시험 응시 모드로 바로 진입합니다.`}
+                                                >
+                                                  <FileCheck size={14} />
+                                                  {person.name} 수험생 재시험 바로 시작하기
+                                                </button>
+                                              )}
+                                            </div>
+                                          </div>
+                                        )}
                                       </div>
                                     ) : firstPassed ? (
                                       <div className="py-4 text-center text-xs text-stone-400">
@@ -3037,25 +3519,41 @@ service cloud.firestore {
                                             ? '품질보증팀 승인이 완료되었습니다. 응시자가 메인 화면에서 동일 이름으로 2차 재시험을 진행할 수 있습니다.' 
                                             : '1차 평가 미달 인원입니다. 재교육 확인 후 우측 버튼으로 재시험을 승인해 주십시오.'}
                                         </p>
-                                        <div className="flex items-center gap-2">
-                                          {person.firstExam && (
+                                        <div className="flex flex-col gap-2">
+                                          <div className="flex items-center gap-2">
+                                            {person.firstExam && (
+                                              <button
+                                                disabled={approvalActionLoading === (person.firstExam.id || person.firstExam.idNo || person.name)}
+                                                onClick={() => handleToggleReexamApproval(person.firstExam!, !person.isReexamApproved)}
+                                                className={`w-full py-2 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+                                                  person.isReexamApproved
+                                                    ? 'bg-stone-200 hover:bg-red-50 text-stone-700 hover:text-red-600 border border-stone-300'
+                                                    : 'bg-[#0F5A3E] hover:bg-emerald-800 text-white shadow-xs'
+                                                }`}
+                                              >
+                                                {person.isReexamApproved ? (
+                                                  <>승인 취소하기</>
+                                                ) : (
+                                                  <>
+                                                    <CheckCircle2 size={14} />
+                                                    품질보증팀 재시험 승인
+                                                  </>
+                                                )}
+                                              </button>
+                                            )}
+                                          </div>
+                                          {person.isReexamApproved && !has2nd && (
                                             <button
-                                              disabled={approvalActionLoading === (person.firstExam.id || person.firstExam.idNo || person.name)}
-                                              onClick={() => handleToggleReexamApproval(person.firstExam!)}
-                                              className={`w-full py-2 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 ${
-                                                person.isReexamApproved
-                                                  ? 'bg-stone-200 hover:bg-red-50 text-stone-700 hover:text-red-600 border border-stone-300'
-                                                  : 'bg-[#0F5A3E] hover:bg-emerald-800 text-white shadow-xs'
-                                              }`}
+                                              type="button"
+                                              onClick={() => {
+                                                setIsAdminMode(false);
+                                                handleStartReexam(person.firstExam || undefined);
+                                              }}
+                                              className="w-full py-2 px-3 rounded-lg text-xs font-bold bg-[#0F5A3E] hover:bg-emerald-800 text-white transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs active:scale-98"
+                                              title={`${person.name} 님의 2차 재시험 응시 모드로 바로 진입합니다.`}
                                             >
-                                              {person.isReexamApproved ? (
-                                                <>승인 취소하기</>
-                                              ) : (
-                                                <>
-                                                  <CheckCircle2 size={14} />
-                                                  품질보증팀 재시험 승인
-                                                </>
-                                              )}
+                                              <FileCheck size={14} />
+                                              {person.name} 수험생 2차 재시험 바로 시작하기
                                             </button>
                                           )}
                                         </div>
@@ -3152,6 +3650,18 @@ service cloud.firestore {
                                       <UserCheck size={13} />
                                       재시험 승인됨
                                     </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setIsAdminMode(false);
+                                        handleStartReexam(record);
+                                      }}
+                                      className="px-2 py-1 text-[11px] font-bold bg-[#0F5A3E] hover:bg-emerald-800 text-white rounded-lg transition-colors shadow-2xs cursor-pointer flex items-center gap-1"
+                                      title={`${record.name} 수험생으로 2차 재시험 즉시 시작`}
+                                    >
+                                      <FileCheck size={12} />
+                                      재시험 시작
+                                    </button>
                                     <button
                                       disabled={approvalActionLoading === actionTargetKey}
                                       onClick={() => handleToggleReexamApproval(record)}
@@ -3340,15 +3850,31 @@ service cloud.firestore {
                   </p>
                 </div>
 
-                {myLocalExamRecord !== null ? (() => {
+                {myLocalExamRecord !== null && (!isHistoryLoaded || examHistory.some(r => 
+                  (myLocalExamRecord.id && r.id === myLocalExamRecord.id) ||
+                  (myLocalExamRecord.idNo && r.idNo === myLocalExamRecord.idNo) ||
+                  (r.name === myLocalExamRecord.name && r.dept === myLocalExamRecord.dept)
+                )) ? (() => {
                   const latestRecord = examHistory.find(r => 
                     (myLocalExamRecord.id && r.id === myLocalExamRecord.id) ||
                     (myLocalExamRecord.idNo && r.idNo === myLocalExamRecord.idNo) ||
                     (r.name === myLocalExamRecord.name && r.dept === myLocalExamRecord.dept)
                   ) || myLocalExamRecord;
 
-                  const isCandidatePassed = latestRecord.score >= passingScoreThreshold;
-                  const isReexamApproved = !!latestRecord.reexamApproved;
+                  const norm = (s?: string) => (s || "").replace(/\s+/g, "").trim().toLowerCase();
+                  const targetNormName = norm(latestRecord.name);
+
+                  const isCandidatePassed = latestRecord.score >= passingScoreThreshold || examHistory.some(r => norm(r.name) === targetNormName && r.score >= passingScoreThreshold);
+                  const isReexamApproved = Boolean(
+                    latestRecord.reexamApproved || 
+                    myLocalExamRecord?.reexamApproved || 
+                    examHistory.some(r => 
+                      ((latestRecord.id && r.id === latestRecord.id) || 
+                       (latestRecord.idNo && r.idNo === latestRecord.idNo) || 
+                       (targetNormName && norm(r.name) === targetNormName)) && 
+                      r.reexamApproved
+                    )
+                  );
 
                   return (
                     <div className="p-6 md:p-8 space-y-6">
@@ -3446,7 +3972,7 @@ service cloud.firestore {
                                 </div>
                               </div>
                               <button
-                                onClick={handleStartReexam}
+                                onClick={() => handleStartReexam(latestRecord)}
                                 className="w-full py-3.5 bg-[#0F5A3E] hover:bg-emerald-800 text-white font-bold text-sm rounded-xl shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
                               >
                                 <FileCheck size={18} />
@@ -3465,15 +3991,48 @@ service cloud.firestore {
                               <button
                                 onClick={async () => {
                                   const refreshed = await fetchExamHistoryOnce();
-                                  const updatedRec = refreshed.find(r => 
-                                    (examinee.idNo && r.idNo === examinee.idNo) ||
-                                    (examinee.name && r.name === examinee.name && examinee.dept && r.dept === examinee.dept)
-                                  ) || latestRecord;
+                                  const targetId = myLocalExamRecord?.id || latestRecord?.id;
+                                  const targetName = myLocalExamRecord?.name || latestRecord?.name || examinee.name;
+                                  const targetDept = myLocalExamRecord?.dept || latestRecord?.dept || examinee.dept;
+                                  const targetIdNo = myLocalExamRecord?.idNo || latestRecord?.idNo || examinee.idNo;
+                                  const norm = (s?: string) => (s || "").replace(/\s+/g, "").trim().toLowerCase();
+                                  const targetNorm = norm(targetName);
 
-                                  if (updatedRec?.reexamApproved) {
-                                    alert("품질보증팀 재시험 승인이 완료되었습니다! 즉시 재시험을 시작할 수 있습니다.");
+                                  const updatedRec = refreshed.find(r => 
+                                    (targetId && r.id === targetId) ||
+                                    (targetIdNo && r.idNo === targetIdNo) ||
+                                    (targetNorm && norm(r.name) === targetNorm)
+                                  );
+
+                                  const isAnyApproved = refreshed.some(r => 
+                                    ((targetId && r.id === targetId) ||
+                                     (targetIdNo && r.idNo === targetIdNo) ||
+                                     (targetNorm && norm(r.name) === targetNorm)) &&
+                                    r.reexamApproved
+                                  );
+
+                                  if (updatedRec || myLocalExamRecord) {
+                                    const base = updatedRec || myLocalExamRecord!;
+                                    const finalized = { ...base, reexamApproved: isAnyApproved || Boolean(base.reexamApproved) };
+                                    setMyLocalExamRecord(finalized);
+                                    localStorage.setItem("my_haccp_exam_record", JSON.stringify(finalized));
+                                    if (finalized.reexamApproved) {
+                                      alert("품질보증팀 재시험 승인이 완료되었습니다! 즉시 재시험을 시작할 수 있습니다.");
+                                    } else {
+                                      alert("현재 품질보증팀 승인 대기 중입니다. 품질보증팀에 승인을 요청해 주세요.");
+                                    }
                                   } else {
-                                    alert("현재 품질보증팀 승인 대기 중입니다. 품질보증팀에 승인을 요청해 주세요.");
+                                    // 관리자에 의해 기록이 초기화/삭제됨
+                                    setMyLocalExamRecord(null);
+                                    localStorage.removeItem("my_haccp_exam_record");
+                                    localStorage.removeItem("haccp_user_records_map");
+                                    localStorage.removeItem("haccp_examinee_info");
+                                    localStorage.removeItem("haccp_exam_answers");
+                                    setIsSubmitted(false);
+                                    setIsExamStarted(false);
+                                    setIsReexamMode(false);
+                                    setAnswers({});
+                                    alert("관리자(품질보증팀)에 의해 시험 기록이 초기화되었습니다. 처음부터 다시 시험에 응시할 수 있습니다.");
                                   }
                                 }}
                                 className="w-full py-2 bg-stone-50 hover:bg-stone-100 text-stone-700 border border-stone-250 font-semibold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
@@ -3667,10 +4226,20 @@ service cloud.firestore {
 
                     <button
                       type="submit"
-                      className="w-full py-3 bg-[#0F5A3E] hover:bg-emerald-800 text-white font-medium text-sm rounded-xl shadow-xs hover:shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer mt-4"
+                      disabled={isVerifyingExaminee}
+                      className="w-full py-3 bg-[#0F5A3E] hover:bg-emerald-800 disabled:bg-stone-300 disabled:cursor-not-allowed text-white font-medium text-sm rounded-xl shadow-xs hover:shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer mt-4"
                     >
-                      <FileText size={18} />
-                      HACCP 내부평가 시험 시작
+                      {isVerifyingExaminee ? (
+                        <>
+                          <Loader2 size={18} className="animate-spin" />
+                          응시 자격 확인 중...
+                        </>
+                      ) : (
+                        <>
+                          <FileText size={18} />
+                          HACCP 내부평가 시험 시작
+                        </>
+                      )}
                     </button>
 
                     <div className="pt-2.5 border-t border-stone-150 flex justify-center">
@@ -3703,13 +4272,11 @@ service cloud.firestore {
                       수험생: <strong className="text-stone-900">{examinee.name}</strong> ({examinee.dept} / {examinee.idNo})
                     </span>
                   </div>
-                  <button
-                    onClick={handleExitExam}
-                    className="px-4 py-1.5 bg-emerald-800 hover:bg-emerald-900 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Home size={13} />
-                    처음 화면으로 이동
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-stone-500 font-medium px-2.5 py-1 bg-stone-100 rounded-lg border border-stone-200">
+                      평가 채점 완료
+                    </span>
+                  </div>
                 </div>
 
                 {/* RE-EXAM MODE INDICATOR BANNER */}
@@ -3795,14 +4362,6 @@ service cloud.firestore {
                               <Check size={18} className="text-emerald-700 shrink-0" />
                               <span>축하합니다! 합격 기준({passingScoreThreshold}점)을 충족하여 평가를 무사히 통과하였습니다.</span>
                             </p>
-                            <div className="flex justify-center gap-2">
-                              <button
-                                onClick={handleExitExam}
-                                className="px-6 py-2.5 bg-[#0F5A3E] text-white hover:bg-emerald-800 font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
-                              >
-                                확인 및 처음으로
-                              </button>
-                            </div>
                           </div>
                         ) : finalScore < 50 ? (
                           /* 50점 미만: 재교육 + 재평가 대상 (빨간색 테마) */
@@ -3817,14 +4376,6 @@ service cloud.firestore {
                                   ? `2차 재시험에서도 기준 점수(${passingScoreThreshold}점)에 도달하지 못했습니다. 품질보증팀의 별도 심층 교육 및 지도 지침에 따라 주시기 바랍니다.`
                                   : `귀하의 취득 점수는 ${finalScore}점으로, 50점 미만 [재교육 + 재평가] 대상입니다. 사내 HACCP 평가 규정에 따라 품질보증팀의 재교육을 이수하신 후 품질보증팀의 승인을 받아 재평가에 응시하실 수 있습니다.`}
                               </span>
-                            </div>
-                            <div className="flex justify-center gap-2">
-                              <button
-                                onClick={handleExitExam}
-                                className="px-6 py-2.5 bg-red-700 hover:bg-red-800 text-white font-bold text-xs rounded-xl transition-colors cursor-pointer shadow-xs"
-                              >
-                                확인 및 처음으로
-                              </button>
                             </div>
                           </div>
                         ) : (
@@ -3841,16 +4392,113 @@ service cloud.firestore {
                                   : `귀하의 취득 점수는 ${finalScore}점으로, 합격 기준(${passingScoreThreshold}점) 미만 [재평가] 대상입니다. 사내 HACCP 평가 규정에 따라 품질보증팀의 승인을 받으신 후 재평가에 응시하실 수 있습니다.`}
                               </span>
                             </div>
-                            <div className="flex justify-center gap-2">
-                              <button
-                                onClick={handleExitExam}
-                                className="px-6 py-2.5 bg-stone-700 hover:bg-stone-800 text-white font-bold text-xs rounded-xl transition-colors cursor-pointer shadow-xs"
-                              >
-                                확인 및 처음으로
-                              </button>
-                            </div>
                           </div>
                         )}
+
+                        {/* Evaluation Closed Notice Box or Reexam Action Box */}
+                        {(() => {
+                          const norm = (s?: string) => (s || "").replace(/\s+/g, "").trim().toLowerCase();
+                          const targetNorm = norm(examinee.name || myLocalExamRecord?.name);
+
+                          const isSubmissionApprovedForReexam = !isPassed && Boolean(
+                            myLocalExamRecord?.reexamApproved || 
+                            examHistory.some(r => 
+                              ((myLocalExamRecord?.id && r.id === myLocalExamRecord.id) || 
+                               (myLocalExamRecord?.idNo && r.idNo === myLocalExamRecord.idNo) ||
+                               (targetNorm && norm(r.name) === targetNorm)) && 
+                              r.reexamApproved
+                            )
+                          );
+
+                          if (isSubmissionApprovedForReexam) {
+                            return (
+                              <div className="w-full bg-emerald-50 border-2 border-emerald-300 p-5 rounded-2xl text-center space-y-3 mt-3 shadow-2xs">
+                                <div className="flex items-center justify-center gap-2 font-bold text-sm text-emerald-950">
+                                  <CheckCircle2 size={18} className="text-emerald-700" />
+                                  <span>품질보증팀 재시험 승인 완료!</span>
+                                  <span className="px-2 py-0.5 bg-emerald-200/80 text-emerald-900 rounded-md font-bold text-[10px]">
+                                    재시험 응시 가능
+                                  </span>
+                                </div>
+                                <p className="text-xs text-emerald-800 leading-normal">
+                                  품질보증팀의 재시험 승인이 완료되었습니다. 아래 버튼을 눌러 2차 재시험을 즉시 시작하실 수 있습니다.
+                                </p>
+                                <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5 pt-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleStartReexam(myLocalExamRecord || undefined)}
+                                    className="w-full sm:w-auto px-6 py-3 bg-[#0F5A3E] hover:bg-emerald-800 text-white text-xs font-bold rounded-xl transition-all inline-flex items-center justify-center gap-2 cursor-pointer shadow-md active:scale-98"
+                                  >
+                                    <FileCheck size={16} />
+                                    2026년도 HACCP 2차 재시험 바로 시작하기
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <div className="w-full bg-stone-50 border border-stone-200 p-4 rounded-xl text-center space-y-2.5 mt-3">
+                              <div className="flex items-center justify-center gap-1.5 font-bold text-xs text-stone-800">
+                                <CheckCircle2 size={14} className={isPassed ? "text-emerald-700" : "text-amber-700"} />
+                                <span>
+                                  {isPassed 
+                                    ? "평가 채점 완료 및 최종 합격 (종료)"
+                                    : "1차 평가 종료 (재시험은 품질보증팀 담당자 재승인 후 가능)"}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-stone-600 leading-normal">
+                                {isPassed
+                                  ? "축하드립니다! 본 평가는 성공적으로 종료되었으며 공식 기록되었습니다."
+                                  : "사내 규정에 따라 1차 시험 종료 후 임의 재응시는 불가능합니다. 품질보증팀 담당자의 재승인 완료 후에만 재시험이 가능하며, 관리자모드에서 승인 후 다시 시험지 QR코드를 스캔하시면 문제를 풀 수 있습니다."
+                                }
+                              </p>
+                              {!isPassed && (
+                                <div className="p-3 bg-amber-50/90 rounded-xl border border-amber-250 text-xs text-amber-950 font-medium text-center space-y-1">
+                                  <div className="font-bold text-amber-900 flex items-center justify-center gap-1.5">
+                                    <Clock3 size={14} className="text-amber-700" />
+                                    <span>재시험 응시 안내</span>
+                                  </div>
+                                  <p className="text-[11px] text-amber-800">
+                                    관리자(품질보증팀)가 재시험을 승인한 후, <strong>스마트폰 카메라로 시험지 QR코드를 다시 스캔</strong>하시면 2차 재시험을 시작하실 수 있습니다.
+                                  </p>
+                                </div>
+                              )}
+                              <div className="pt-1 flex flex-col sm:flex-row items-center justify-center gap-2">
+                                {!isPassed && (
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      const refreshed = await fetchExamHistoryOnce();
+                                      const cleanName = (examinee.name || myLocalExamRecord?.name || "").trim();
+                                      const cleanNorm = norm(cleanName);
+                                      const approved = refreshed.some(r => 
+                                        ((myLocalExamRecord?.id && r.id === myLocalExamRecord.id) ||
+                                         (myLocalExamRecord?.idNo && r.idNo === myLocalExamRecord.idNo) ||
+                                         (cleanNorm && norm(r.name) === cleanNorm)) && 
+                                        r.reexamApproved
+                                      );
+                                      if (approved) {
+                                        if (myLocalExamRecord) {
+                                          const upd = { ...myLocalExamRecord, reexamApproved: true };
+                                          setMyLocalExamRecord(upd);
+                                          localStorage.setItem("my_haccp_exam_record", JSON.stringify(upd));
+                                        }
+                                        alert("품질보증팀 재시험 승인이 확인되었습니다! 시험지 QR코드를 다시 스캔하시면 2차 평가에 응시하실 수 있습니다.");
+                                      } else {
+                                        alert("현재 품질보증팀 승인 대기 중입니다. 관리자(품질보증팀)에 승인을 요청해 주세요.");
+                                      }
+                                    }}
+                                    className="px-4 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs font-bold rounded-xl transition-all inline-flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                                  >
+                                    <Clock3 size={14} className="text-amber-700" />
+                                    품질보증팀 승인 상태 새로고침 / 확인
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     </div>
                   </div>
@@ -4368,24 +5016,13 @@ service cloud.firestore {
                           답안 제출 (채점하기)
                         </button>
                       ) : (
-                        <button
-                          type="button"
-                          onClick={handleExitExam}
-                          className="w-full py-2.5 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-                        >
-                          확인 및 처음으로
-                        </button>
+                        <div className="w-full py-2.5 bg-stone-100 text-stone-600 text-xs font-bold rounded-xl border border-stone-200 text-center flex items-center justify-center gap-1.5 shadow-2xs">
+                          <CheckCircle2 size={14} className="text-emerald-700" />
+                          평가 제출 완료 (종료됨)
+                        </div>
                       )}
                     </div>
                   </div>
-
-                  {/* Quick Exit Button */}
-                  <button
-                    onClick={handleExitExam}
-                    className="w-full py-2 bg-stone-100 hover:bg-stone-200 text-stone-500 hover:text-stone-800 text-xs font-medium rounded-xl border border-stone-200 transition-colors"
-                  >
-                    평가 종료 (초기화)
-                  </button>
                 </aside>
 
               </div>
@@ -4986,16 +5623,6 @@ service cloud.firestore {
                   <CheckCircle2 size={16} />
                   현재 답안으로 시험 제출 및 채점하기
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowTimeExpiredModal(false);
-                    handleExitExam();
-                  }}
-                  className="w-full py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold text-xs rounded-xl transition-all cursor-pointer"
-                >
-                  시험 포기 및 처음 화면으로 이동
-                </button>
               </div>
             </motion.div>
           </div>
@@ -5067,19 +5694,17 @@ service cloud.firestore {
                     시험지 연결 주소 (URL)
                   </label>
                   <div className="flex items-center gap-2">
-                    {qrUrl !== getPublicShareUrl() && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const pubUrl = getPublicShareUrl();
-                          setQrUrl(pubUrl);
-                          localStorage.setItem("saved_custom_qr_url", pubUrl);
-                        }}
-                        className="text-[10px] font-bold text-stone-500 hover:text-stone-800 underline cursor-pointer"
-                      >
-                        기본 주소(Vercel)로 복원
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        localStorage.removeItem("saved_custom_qr_url");
+                        setQrUrl("https://haccp-test.vercel.app");
+                      }}
+                      className="text-[10px] font-bold text-[#0F5A3E] hover:text-emerald-900 underline cursor-pointer"
+                      title="GitHub 연동 공식 도메인(https://haccp-test.vercel.app)으로 복원합니다"
+                    >
+                      기본 공식 주소(haccp-test.vercel.app)로 복원
+                    </button>
                   </div>
                 </div>
                 <div className="flex gap-1.5">
