@@ -187,11 +187,11 @@ export default function App() {
   const [quizMode, setQuizMode] = useState<'paper' | 'card'>('paper');
   const [currentCardIndex, setCurrentCardIndex] = useState(0);
   const [selectedExamCategory, setSelectedExamCategory] = useState<ExamCategoryId>(() => {
-    return parseExamCategoryFromLocation() || "regular";
+    return parseExamCategoryFromLocation() || "new_hire_2026_11";
   });
   const [shuffledQuestions, setShuffledQuestions] = useState<Question[]>(() => {
     const urlCat = parseExamCategoryFromLocation();
-    return getQuestionsByCategory(urlCat || "regular");
+    return getQuestionsByCategory(urlCat || "new_hire_2026_11");
   });
   
   // Timer States (30분 제한 시간)
@@ -254,7 +254,7 @@ export default function App() {
   // 시험지 출력 / 파일 저장 모달 상태
   const [showExamPaperModal, setShowExamPaperModal] = useState(false);
   const [examPaperYear, setExamPaperYear] = useState<string>(() => new Date().getFullYear().toString());
-  const [examPaperCategory, setExamPaperCategory] = useState<ExamCategoryId>('regular');
+  const [examPaperCategory, setExamPaperCategory] = useState<ExamCategoryId>('new_hire_2026_11');
   const [examPaperType, setExamPaperType] = useState<'student' | 'teacher'>('student');
   const [examPreviewTab, setExamPreviewTab] = useState<'both' | 'page1' | 'page2'>('both');
   const [examPreviewZoom, setExamPreviewZoom] = useState<'normal' | 'large' | 'xlarge' | 'xxlarge'>('large');
@@ -263,21 +263,17 @@ export default function App() {
 
   // QR Code 공유 모달 상태
   const [showQrModal, setShowQrModal] = useState(false);
-  const [qrExamCategory, setQrExamCategory] = useState<ExamCategoryId>('regular');
   const [qrUrl, setQrUrl] = useState("https://haccp-test.vercel.app");
   const [copied, setCopied] = useState(false);
 
   // 모바일 스마트폰 시험 응시용 고정 공식 URL (GitHub 연동 Vercel 주소 고정 유지)
-  const getPublicShareUrl = (targetCategory?: ExamCategoryId) => {
+  const getPublicShareUrl = () => {
     let baseUrl = "https://haccp-test.vercel.app";
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("saved_custom_qr_url");
       if (saved && saved.trim().startsWith("http") && !saved.includes("ais-pre-") && !saved.includes("ais-dev-")) {
         baseUrl = saved.trim().split("?")[0].replace(/\/+$/, "");
       }
-    }
-    if (targetCategory === "new_hire_2026_11") {
-      return `${baseUrl}/?exam=new_2026_11`;
     }
     return baseUrl;
   };
@@ -292,7 +288,7 @@ export default function App() {
     } catch {
       // ignore storage errors
     }
-    setQrUrl(getPublicShareUrl(qrExamCategory));
+    setQrUrl(getPublicShareUrl());
   }, []);
 
   const passingScoreThreshold = 70; // 70 points out of 100 (14 correct answers)
@@ -418,12 +414,6 @@ export default function App() {
       try {
         const parsedLocal = JSON.parse(savedLocalRecord);
         setMyLocalExamRecord(parsedLocal);
-        const urlCat = parseExamCategoryFromLocation();
-        if (!urlCat && parsedLocal?.examCategory) {
-          const catId = getExamCategoryId(parsedLocal.examCategory);
-          setSelectedExamCategory(catId);
-          setShuffledQuestions(getQuestionsByCategory(catId));
-        }
       } catch (e) {
         console.error(e);
       }
@@ -1358,7 +1348,7 @@ export default function App() {
     const lastNames = ["김", "이", "박", "최", "정", "강", "조", "윤", "장", "임", "한", "오", "서", "신", "권", "황", "안", "송", "류", "전"];
     const departments = ["양조1팀", "양조2팀", "생산지원팀", "설비기술팀", "품질보증팀", "자연그대로"];
     
-    const targetDummyCategory: ExamCategoryId = examCategoryFilter === 'new_hire_2026_11' ? 'new_hire_2026_11' : 'regular';
+    const targetDummyCategory: ExamCategoryId = examCategoryFilter === 'regular' ? 'regular' : 'new_hire_2026_11';
     const targetQuestions = getQuestionsByCategory(targetDummyCategory);
 
     const newSamples: ExamHistory[] = [];
@@ -3242,7 +3232,7 @@ service cloud.firestore {
                       <button
                         onClick={() => {
                           setExamPaperYear(yearFilter === 'all' ? new Date().getFullYear().toString() : yearFilter);
-                          setExamPaperCategory(examCategoryFilter === 'new_hire_2026_11' ? 'new_hire_2026_11' : 'regular');
+                          setExamPaperCategory(examCategoryFilter === 'regular' ? 'regular' : 'new_hire_2026_11');
                           setShowExamPaperModal(true);
                         }}
                         className="px-4 py-2 bg-stone-800 hover:bg-stone-900 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
@@ -3254,9 +3244,7 @@ service cloud.firestore {
 
                       <button
                         onClick={() => {
-                          const targetQrCat: ExamCategoryId = examCategoryFilter === 'new_hire_2026_11' ? 'new_hire_2026_11' : 'regular';
-                          setQrExamCategory(targetQrCat);
-                          setQrUrl(getPublicShareUrl(targetQrCat));
+                          setQrUrl(getPublicShareUrl());
                           setShowQrModal(true);
                         }}
                         className="px-4 py-2 bg-[#0F5A3E] hover:bg-emerald-800 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
@@ -4343,31 +4331,6 @@ service cloud.firestore {
 
                     <div className="space-y-3.5">
                       <div>
-                        <label className="block text-xs font-semibold text-stone-600 mb-1">평가 과정 구분</label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400 pointer-events-none">
-                            <FileText size={16} />
-                          </span>
-                          <select
-                            value={selectedExamCategory}
-                            onChange={e => {
-                              const cat = getExamCategoryId(e.target.value);
-                              setSelectedExamCategory(cat);
-                              setShuffledQuestions(getQuestionsByCategory(cat));
-                              setStartExamError(null);
-                            }}
-                            className="w-full pl-9 pr-10 py-2.5 bg-emerald-50/50 border border-emerald-200 rounded-xl text-sm font-semibold focus:outline-hidden focus:ring-2 focus:ring-emerald-800 focus:bg-white transition-all appearance-none cursor-pointer text-emerald-950"
-                          >
-                            <option value="regular">2026년도 HACCP 정기평가 (전 임직원)</option>
-                            <option value="new_hire_2026_11">2026년 신입사원(11월)</option>
-                          </select>
-                          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 pointer-events-none">
-                            <ChevronDown size={16} />
-                          </span>
-                        </div>
-                      </div>
-
-                      <div>
                         <label className="block text-xs font-semibold text-stone-600 mb-1">성명</label>
                         <div className="relative">
                           <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400">
@@ -4473,8 +4436,7 @@ service cloud.firestore {
                       <button
                         type="button"
                         onClick={() => {
-                          setQrExamCategory(selectedExamCategory);
-                          setQrUrl(getPublicShareUrl(selectedExamCategory));
+                          setQrUrl(getPublicShareUrl());
                           setShowQrModal(true);
                         }}
                         className="flex items-center gap-1.5 text-xs text-[#0F5A3E] hover:text-emerald-900 font-semibold transition-all py-1.5 px-3.5 bg-emerald-50/70 hover:bg-emerald-50 rounded-lg cursor-pointer"
@@ -5904,42 +5866,8 @@ service cloud.firestore {
                   모바일 시험 응시용 QR코드
                 </h3>
                 <p className="text-xs text-stone-500 mt-1 max-w-sm leading-normal">
-                  스마트폰 카메라로 아래 QR코드를 스캔하면 성명·소속 입력 후 {qrExamCategory === 'new_hire_2026_11' ? '2026년 신입사원(11월)' : `${new Date().getFullYear()}년도 정기`} HACCP 시험지로 즉시 이동합니다.
+                  스마트폰 카메라로 아래 QR코드를 스캔하면 성명·소속 입력 후 2026년 신입사원(11월) HACCP 시험지로 즉시 이동합니다.
                 </p>
-              </div>
-
-              {/* QR Exam Category Selector */}
-              <div className="flex items-center gap-1.5 bg-stone-100 p-1 rounded-xl border border-stone-200 text-xs">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setQrExamCategory('regular');
-                    setQrUrl(getPublicShareUrl('regular'));
-                    setCopied(false);
-                  }}
-                  className={`flex-1 py-1.5 px-2.5 rounded-lg font-bold transition-all cursor-pointer ${
-                    qrExamCategory === 'regular'
-                      ? 'bg-[#0F5A3E] text-white shadow-2xs'
-                      : 'text-stone-600 hover:bg-white'
-                  }`}
-                >
-                  2026년도 정기평가
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setQrExamCategory('new_hire_2026_11');
-                    setQrUrl(getPublicShareUrl('new_hire_2026_11'));
-                    setCopied(false);
-                  }}
-                  className={`flex-1 py-1.5 px-2.5 rounded-lg font-bold transition-all cursor-pointer ${
-                    qrExamCategory === 'new_hire_2026_11'
-                      ? 'bg-indigo-700 text-white shadow-2xs'
-                      : 'text-stone-600 hover:bg-white'
-                  }`}
-                >
-                  2026년 신입사원(11월)
-                </button>
               </div>
 
               {/* QR Image Container */}
@@ -5975,7 +5903,7 @@ service cloud.firestore {
                       type="button"
                       onClick={() => {
                         localStorage.removeItem("saved_custom_qr_url");
-                        setQrUrl(getPublicShareUrl(qrExamCategory));
+                        setQrUrl(getPublicShareUrl());
                       }}
                       className="text-[10px] font-bold text-[#0F5A3E] hover:text-emerald-900 underline cursor-pointer"
                       title="GitHub 연동 공식 도메인(https://haccp-test.vercel.app)으로 복원합니다"
