@@ -49,7 +49,15 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
-import { haccpQuestions, Question } from "./data/questions";
+import {
+  haccpQuestions,
+  newHire2026NovQuestions,
+  Question,
+  ExamCategoryId,
+  EXAM_CATEGORIES,
+  getExamCategoryId,
+  getQuestionsByCategory
+} from "./data/questions";
 import { collection, addDoc, onSnapshot, query, orderBy, Timestamp, deleteDoc, doc, updateDoc, getDocs, where } from "firebase/firestore";
 import { db } from "./lib/firebase";
 
@@ -98,6 +106,8 @@ interface ExamHistory {
   reexamApproved?: boolean; // 관리자 재시험 승인 여부
   isReexam?: boolean;       // 재시험 여부
   round?: number;           // 1차(1) or 2차 재시험(2)
+  examCategory?: ExamCategoryId; // regular | new_hire_2026_11
+  examCategoryLabel?: string;
 }
 
 // Helper to shuffle array
@@ -129,6 +139,7 @@ export interface PersonExamSummary {
   dept: string;
   idNo?: string;
   year: number;
+  examCategory: ExamCategoryId;
   firstExam?: ExamHistory;
   secondExam?: ExamHistory;
   isTargetForReexam: boolean;
@@ -137,6 +148,29 @@ export interface PersonExamSummary {
   latestDate: string;
   bestScore: number;
 }
+
+const parseExamCategoryFromLocation = (): ExamCategoryId | null => {
+  if (typeof window === "undefined") return null;
+  const checkParams = (searchStr: string): ExamCategoryId | null => {
+    const params = new URLSearchParams(searchStr);
+    const raw = (params.get("exam") || params.get("category") || params.get("type") || "").trim().toLowerCase();
+    if (raw === "new_2026_11" || raw === "new_hire_2026_11" || raw === "2026-11-newhire" || raw === "newhire") {
+      return "new_hire_2026_11";
+    }
+    if (raw === "regular") {
+      return "regular";
+    }
+    return null;
+  };
+  const fromSearch = checkParams(window.location.search);
+  if (fromSearch) return fromSearch;
+  const hashIdx = window.location.hash.indexOf("?");
+  if (hashIdx !== -1) {
+    const fromHash = checkParams(window.location.hash.slice(hashIdx));
+    if (fromHash) return fromHash;
+  }
+  return null;
+};
 
 export default function App() {
   // 1. App States
@@ -152,7 +186,13 @@ export default function App() {
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [quizMode, setQuizMode] = useState<'paper' | 'card'>('paper');
   const [currentCardIndex, setCurrentCardIndex] = useState(0);
-  const [shuffledQuestions, setShuffledQuestions] = useState<Question[]>(haccpQuestions);
+  const [selectedExamCategory, setSelectedExamCategory] = useState<ExamCategoryId>(() => {
+    return parseExamCategoryFromLocation() || "regular";
+  });
+  const [shuffledQuestions, setShuffledQuestions] = useState<Question[]>(() => {
+    const urlCat = parseExamCategoryFromLocation();
+    return getQuestionsByCategory(urlCat || "regular");
+  });
   
   // Timer States (30분 제한 시간)
   const [secondsElapsed, setSecondsElapsed] = useState(0);
@@ -175,6 +215,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<'all' | 'passed' | 'reexam' | 'retrain' | 'reexam_pending' | 'reexam_approved'>('all');
   const [yearFilter, setYearFilter] = useState<string>("all");
+  const [examCategoryFilter, setExamCategoryFilter] = useState<'all' | ExamCategoryId>('all');
   const [dummyCountInput, setDummyCountInput] = useState<string>("5");
   const [adminViewMode, setAdminViewMode] = useState<'grouped' | 'list'>('grouped'); // 인원별 1차·2차 묶음이 기본값
 
@@ -213,6 +254,7 @@ export default function App() {
   // 시험지 출력 / 파일 저장 모달 상태
   const [showExamPaperModal, setShowExamPaperModal] = useState(false);
   const [examPaperYear, setExamPaperYear] = useState<string>(() => new Date().getFullYear().toString());
+  const [examPaperCategory, setExamPaperCategory] = useState<ExamCategoryId>('regular');
   const [examPaperType, setExamPaperType] = useState<'student' | 'teacher'>('student');
   const [examPreviewTab, setExamPreviewTab] = useState<'both' | 'page1' | 'page2'>('both');
   const [examPreviewZoom, setExamPreviewZoom] = useState<'normal' | 'large' | 'xlarge' | 'xxlarge'>('large');
@@ -221,18 +263,23 @@ export default function App() {
 
   // QR Code 공유 모달 상태
   const [showQrModal, setShowQrModal] = useState(false);
+  const [qrExamCategory, setQrExamCategory] = useState<ExamCategoryId>('regular');
   const [qrUrl, setQrUrl] = useState("https://haccp-test.vercel.app");
   const [copied, setCopied] = useState(false);
 
   // 모바일 스마트폰 시험 응시용 고정 공식 URL (GitHub 연동 Vercel 주소 고정 유지)
-  const getPublicShareUrl = () => {
+  const getPublicShareUrl = (targetCategory?: ExamCategoryId) => {
+    let baseUrl = "https://haccp-test.vercel.app";
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("saved_custom_qr_url");
       if (saved && saved.trim().startsWith("http") && !saved.includes("ais-pre-") && !saved.includes("ais-dev-")) {
-        return saved.trim();
+        baseUrl = saved.trim().split("?")[0].replace(/\/+$/, "");
       }
     }
-    return "https://haccp-test.vercel.app";
+    if (targetCategory === "new_hire_2026_11") {
+      return `${baseUrl}/?exam=new_2026_11`;
+    }
+    return baseUrl;
   };
 
   // 기본 주소를 GitHub 연동 공식 도메인(https://haccp-test.vercel.app)으로 설정
@@ -245,7 +292,7 @@ export default function App() {
     } catch {
       // ignore storage errors
     }
-    setQrUrl(getPublicShareUrl());
+    setQrUrl(getPublicShareUrl(qrExamCategory));
   }, []);
 
   const passingScoreThreshold = 70; // 70 points out of 100 (14 correct answers)
@@ -369,7 +416,14 @@ export default function App() {
     const savedLocalRecord = localStorage.getItem("my_haccp_exam_record");
     if (savedLocalRecord) {
       try {
-        setMyLocalExamRecord(JSON.parse(savedLocalRecord));
+        const parsedLocal = JSON.parse(savedLocalRecord);
+        setMyLocalExamRecord(parsedLocal);
+        const urlCat = parseExamCategoryFromLocation();
+        if (!urlCat && parsedLocal?.examCategory) {
+          const catId = getExamCategoryId(parsedLocal.examCategory);
+          setSelectedExamCategory(catId);
+          setShuffledQuestions(getQuestionsByCategory(catId));
+        }
       } catch (e) {
         console.error(e);
       }
@@ -498,10 +552,12 @@ export default function App() {
   // 3-1. Synchronize local examinee record with Firestore latest updates (e.g. reexam approval status or deletion)
   useEffect(() => {
     if (isHistoryLoaded && myLocalExamRecord) {
+      const localCat = getExamCategoryId(myLocalExamRecord.examCategory);
       const matched = examHistory.find(r => 
-        (myLocalExamRecord.id && r.id === myLocalExamRecord.id) ||
+        ((myLocalExamRecord.id && r.id === myLocalExamRecord.id) ||
         (myLocalExamRecord.idNo && r.idNo === myLocalExamRecord.idNo) ||
-        (r.name === myLocalExamRecord.name && r.dept === myLocalExamRecord.dept)
+        (r.name === myLocalExamRecord.name && r.dept === myLocalExamRecord.dept)) &&
+        getExamCategoryId(r.examCategory) === localCat
       );
 
       if (matched) {
@@ -544,6 +600,7 @@ export default function App() {
     const candidateName = (myLocalExamRecord?.name || examinee.name || "").trim();
     if (!candidateName) return;
     const targetNorm = norm(candidateName);
+    const targetCat = getExamCategoryId(myLocalExamRecord?.examCategory || selectedExamCategory);
 
     // 이미 합격한 경우 폴링 불필요
     if (myLocalExamRecord?.score && myLocalExamRecord.score >= passingScoreThreshold) return;
@@ -555,7 +612,7 @@ export default function App() {
         let foundApproved = false;
         snap.forEach((docSnap) => {
           const d = docSnap.data();
-          if (d.reexamApproved) {
+          if (d.reexamApproved && getExamCategoryId(d.examCategory) === targetCat) {
             foundApproved = true;
           }
         });
@@ -565,7 +622,7 @@ export default function App() {
           const allSnap = await getDocs(collection(db, "exam_history"));
           allSnap.forEach(d => {
             const data = d.data();
-            if (norm(data.name) === targetNorm && data.reexamApproved) {
+            if (norm(data.name) === targetNorm && data.reexamApproved && getExamCategoryId(data.examCategory) === targetCat) {
               foundApproved = true;
             }
           });
@@ -578,7 +635,7 @@ export default function App() {
             localStorage.setItem("my_haccp_exam_record", JSON.stringify(updated));
           }
           setExamHistory(prev => prev.map(r => 
-            norm(r.name) === targetNorm ? { ...r, reexamApproved: true } : r
+            (norm(r.name) === targetNorm && getExamCategoryId(r.examCategory) === targetCat) ? { ...r, reexamApproved: true } : r
           ));
         }
       } catch {
@@ -587,10 +644,15 @@ export default function App() {
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [isAdminMode, isExamStarted, isSubmitted, myLocalExamRecord, examinee.name]);
+  }, [isAdminMode, isExamStarted, isSubmitted, myLocalExamRecord, examinee.name, selectedExamCategory]);
 
-  // 4. Score Calculation
-  const correctCount = haccpQuestions.reduce((acc, q) => {
+  // 4. Score Calculation & Category Question Sync
+  useEffect(() => {
+    setShuffledQuestions(getQuestionsByCategory(selectedExamCategory));
+  }, [selectedExamCategory]);
+
+  const activeQuestions = getQuestionsByCategory(selectedExamCategory);
+  const correctCount = activeQuestions.reduce((acc, q) => {
     return acc + (answers[q.id] === q.correctAnswer ? 1 : 0);
   }, 0);
   const finalScore = correctCount * 5; // 20 questions, 5 points each
@@ -623,14 +685,16 @@ export default function App() {
         if (!rDept) rDept = info.dept;
       }
 
-      // 고유 그룹 키 결정 (TypeError 방지 및 안전한 분리)
+      const rCat = getExamCategoryId(r.examCategory);
+
+      // 고유 그룹 키 결정 (평가 과정 구분 포함하여 정기평가와 신입사원 평가 분리)
       let key = "";
       if (rName) {
-        key = `${rName}_${rDept || '기타'}`;
+        key = `${rName}_${rDept || '기타'}_${rCat}`;
       } else if (rIdNo) {
-        key = `idno_${rIdNo}`;
+        key = `idno_${rIdNo}_${rCat}`;
       } else {
-        key = `doc_${r.id || Math.random()}`;
+        key = `doc_${r.id || Math.random()}_${rCat}`;
       }
 
       if (!map.has(key)) {
@@ -669,6 +733,7 @@ export default function App() {
       const dept = (rep.dept || "").trim() || (firstExam?.dept || "").trim() || (secondExam?.dept || "").trim() || "부서 미지정";
       const idNo = firstExam?.idNo || rep.idNo || secondExam?.idNo || "";
       const year = rep.year || (rep.date ? parseInt(rep.date.split('-')[0], 10) : new Date().getFullYear());
+      const examCategory = getExamCategoryId(rep.examCategory || firstExam?.examCategory || secondExam?.examCategory);
 
       const firstScore = firstExam ? firstExam.score : 0;
       const firstPassed = firstScore >= passingScoreThreshold;
@@ -701,6 +766,7 @@ export default function App() {
         dept,
         idNo,
         year,
+        examCategory,
         firstExam,
         secondExam,
         isTargetForReexam,
@@ -738,6 +804,9 @@ export default function App() {
     const cleanDept = base ? ((base.dept || "").trim() || "품질보증팀") : ((examinee.dept || "").trim() || "품질보증팀");
     const cleanIdNo = base?.idNo || examinee.idNo;
 
+    const targetCat = getExamCategoryId(base?.examCategory || selectedExamCategory);
+    setSelectedExamCategory(targetCat);
+
     const fixedExaminee: ExamineeInfo = {
       name: cleanName,
       dept: cleanDept,
@@ -755,8 +824,8 @@ export default function App() {
     setShowOMRModalMobile(false);
     setCurrentCardIndex(0);
 
-    // 문제 세팅
-    setShuffledQuestions(haccpQuestions);
+    // 문제 세팅 (응시 과정에 맞는 20문항 세팅)
+    setShuffledQuestions(getQuestionsByCategory(targetCat));
     setIsExamStarted(true);
     setIsTimerRunning(true);
     setStartExamError(null);
@@ -775,13 +844,17 @@ export default function App() {
     const cleanDept = (record.dept || "").trim();
     const cleanIdNo = (record.idNo || "").trim();
     const targetNormName = norm(cleanName);
+    const targetCat = getExamCategoryId(record.examCategory);
 
     try {
       // 1. 로컬 상태 즉시 낙관적 업데이트 (UI 지연 및 블로킹 방지)
       const updatedHistory = examHistory.map(r => {
-        const isMatch = (record.id && r.id === record.id) ||
-                        (cleanIdNo && (r.idNo || "").trim() === cleanIdNo) ||
-                        (cleanName && norm(r.name) === targetNormName);
+        const isSameCat = getExamCategoryId(r.examCategory) === targetCat;
+        const isMatch = isSameCat && (
+          (record.id && r.id === record.id) ||
+          (cleanIdNo && (r.idNo || "").trim() === cleanIdNo) ||
+          (cleanName && norm(r.name) === targetNormName)
+        );
         if (isMatch) {
           return { ...r, reexamApproved: newApproved };
         }
@@ -791,7 +864,7 @@ export default function App() {
       localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
 
       // 2. 현재 로그인/접속 응시자의 로컬 기록과 일치할 경우 함께 업데이트
-      if (myLocalExamRecord && (
+      if (myLocalExamRecord && getExamCategoryId(myLocalExamRecord.examCategory) === targetCat && (
         (record.id && myLocalExamRecord.id === record.id) || 
         (cleanIdNo && (myLocalExamRecord.idNo || "").trim() === cleanIdNo) || 
         (cleanName && norm(myLocalExamRecord.name) === targetNormName)
@@ -806,11 +879,19 @@ export default function App() {
         const userMapStr = localStorage.getItem("haccp_user_records_map");
         if (userMapStr) {
           const userMap = JSON.parse(userMapStr);
-          if (cleanName && userMap[cleanName]) {
-            userMap[cleanName].reexamApproved = newApproved;
+          if (cleanName && userMap[`${cleanName}_${targetCat}`]) {
+            userMap[`${cleanName}_${targetCat}`].reexamApproved = newApproved;
           }
-          if (cleanName && userMap[`${cleanName}_${cleanDept}`]) {
-            userMap[`${cleanName}_${cleanDept}`].reexamApproved = newApproved;
+          if (cleanName && userMap[`${cleanName}_${cleanDept}_${targetCat}`]) {
+            userMap[`${cleanName}_${cleanDept}_${targetCat}`].reexamApproved = newApproved;
+          }
+          if (targetCat === 'regular') {
+            if (cleanName && userMap[cleanName]) {
+              userMap[cleanName].reexamApproved = newApproved;
+            }
+            if (cleanName && userMap[`${cleanName}_${cleanDept}`]) {
+              userMap[`${cleanName}_${cleanDept}`].reexamApproved = newApproved;
+            }
           }
           localStorage.setItem("haccp_user_records_map", JSON.stringify(userMap));
         }
@@ -826,20 +907,24 @@ export default function App() {
         if (cleanName) {
           const q = query(collection(db, "exam_history"), where("name", "==", cleanName));
           const snap = await getDocs(q);
-          snap.forEach(d => docsToUpdate.add(d.id));
+          snap.forEach(d => {
+            if (getExamCategoryId(d.data().examCategory) === targetCat) docsToUpdate.add(d.id);
+          });
         }
 
         if (cleanIdNo) {
           const qId = query(collection(db, "exam_history"), where("idNo", "==", cleanIdNo));
           const snapId = await getDocs(qId);
-          snapId.forEach(d => docsToUpdate.add(d.id));
+          snapId.forEach(d => {
+            if (getExamCategoryId(d.data().examCategory) === targetCat) docsToUpdate.add(d.id);
+          });
         }
 
         // 전체 컬렉션에서 혹시 공백 차이가 있는 이름 매칭 확인
         const allSnap = await getDocs(collection(db, "exam_history"));
         allSnap.forEach(d => {
           const data = d.data();
-          if ((cleanName && norm(data.name) === targetNormName) || (cleanIdNo && (data.idNo || "").trim() === cleanIdNo)) {
+          if (getExamCategoryId(data.examCategory) === targetCat && ((cleanName && norm(data.name) === targetNormName) || (cleanIdNo && (data.idNo || "").trim() === cleanIdNo))) {
             docsToUpdate.add(d.id);
           }
         });
@@ -866,7 +951,10 @@ export default function App() {
 
   // 관리자 모드: 재시험 승인 대기자 전원 일괄 승인
   const handleBulkApproveReexam = async () => {
-    const pendingRecords = examHistory.filter(r => r.score < passingScoreThreshold && !r.reexamApproved);
+    const pendingRecords = examHistory.filter(r => {
+      const catMatch = examCategoryFilter === 'all' || getExamCategoryId(r.examCategory) === examCategoryFilter;
+      return catMatch && r.score < passingScoreThreshold && !r.reexamApproved;
+    });
     if (pendingRecords.length === 0) {
       showAdminToast("현재 재시험 승인 대기 중인 응시자가 없습니다.", "info");
       return;
@@ -876,7 +964,8 @@ export default function App() {
     try {
       // 1. 로컬 상태 즉시 일괄 승인 반영
       const updatedHistory = examHistory.map(r => {
-        if (r.score < passingScoreThreshold) {
+        const catMatch = examCategoryFilter === 'all' || getExamCategoryId(r.examCategory) === examCategoryFilter;
+        if (catMatch && r.score < passingScoreThreshold) {
           return { ...r, reexamApproved: true };
         }
         return r;
@@ -885,7 +974,7 @@ export default function App() {
       localStorage.setItem("haccp_exam_history_admin", JSON.stringify(updatedHistory));
 
       // 2. 현재 로그인 사용자 기록 일치 시 승인 반영
-      if (myLocalExamRecord && myLocalExamRecord.score < passingScoreThreshold) {
+      if (myLocalExamRecord && myLocalExamRecord.score < passingScoreThreshold && (examCategoryFilter === 'all' || getExamCategoryId(myLocalExamRecord.examCategory) === examCategoryFilter)) {
         const upd = { ...myLocalExamRecord, reexamApproved: true };
         setMyLocalExamRecord(upd);
         localStorage.setItem("my_haccp_exam_record", JSON.stringify(upd));
@@ -896,7 +985,8 @@ export default function App() {
       const docIdsToUpdate: string[] = [];
       allSnap.forEach(d => {
         const data = d.data();
-        if (data.score < passingScoreThreshold && !data.reexamApproved) {
+        const catMatch = examCategoryFilter === 'all' || getExamCategoryId(data.examCategory) === examCategoryFilter;
+        if (catMatch && data.score < passingScoreThreshold && !data.reexamApproved) {
           docIdsToUpdate.push(d.id);
         }
       });
@@ -933,7 +1023,7 @@ export default function App() {
     const targetNormName = norm(cleanName);
 
     try {
-      // 1. Firestore 실시간 쿼리로 해당 응시자의 최신 시험 기록 즉시 확인
+      // 1. Firestore 실시간 쿼리로 해당 응시자의 최신 시험 기록 즉시 확인 (선택된 평가 구분과 일치하는 기록만)
       const userRecords: ExamHistory[] = [];
       try {
         const q = query(
@@ -943,12 +1033,14 @@ export default function App() {
         const querySnap = await getDocs(q);
         querySnap.forEach((docSnap) => {
           const d = docSnap.data();
-          userRecords.push({
-            id: docSnap.id,
-            ...d,
-            name: (d.name || "").trim(),
-            dept: (d.dept || "").trim()
-          } as ExamHistory);
+          if (getExamCategoryId(d.examCategory) === selectedExamCategory) {
+            userRecords.push({
+              id: docSnap.id,
+              ...d,
+              name: (d.name || "").trim(),
+              dept: (d.dept || "").trim()
+            } as ExamHistory);
+          }
         });
 
         // 만약 공백 차이 등으로 정확 매칭이 안 잡힌 경우, 전체 컬렉션에서 정규화 매칭 확인
@@ -956,7 +1048,7 @@ export default function App() {
           const allSnap = await getDocs(collection(db, "exam_history"));
           allSnap.forEach((docSnap) => {
             const d = docSnap.data();
-            if (norm(d.name) === targetNormName) {
+            if (norm(d.name) === targetNormName && getExamCategoryId(d.examCategory) === selectedExamCategory) {
               userRecords.push({
                 id: docSnap.id,
                 ...d,
@@ -972,7 +1064,7 @@ export default function App() {
 
       // 2. 현재 로컬 상태 및 캐시된 이력과 병합 (누락 방지)
       examHistory.forEach(r => {
-        if (norm(r.name) === targetNormName && !userRecords.some(ur => ur.id && ur.id === r.id)) {
+        if (norm(r.name) === targetNormName && getExamCategoryId(r.examCategory) === selectedExamCategory && !userRecords.some(ur => ur.id && ur.id === r.id)) {
           userRecords.push(r);
         }
       });
@@ -984,7 +1076,7 @@ export default function App() {
           const parsed = JSON.parse(cachedAdmin);
           if (Array.isArray(parsed)) {
             parsed.forEach((r: ExamHistory) => {
-              if (norm(r.name) === targetNormName && !userRecords.some(ur => ur.id && ur.id === r.id)) {
+              if (norm(r.name) === targetNormName && getExamCategoryId(r.examCategory) === selectedExamCategory && !userRecords.some(ur => ur.id && ur.id === r.id)) {
                 userRecords.push(r);
               }
             });
@@ -999,11 +1091,13 @@ export default function App() {
         const mySaved = localStorage.getItem("my_haccp_exam_record");
         if (mySaved) {
           const parsedMy = JSON.parse(mySaved);
-          if (parsedMy && norm(parsedMy.name) === targetNormName) {
+          if (parsedMy && norm(parsedMy.name) === targetNormName && getExamCategoryId(parsedMy.examCategory) === selectedExamCategory) {
             const stillExists = examHistory.some(h => 
-              (parsedMy.id && h.id === parsedMy.id) ||
-              (parsedMy.idNo && h.idNo === parsedMy.idNo) ||
-              (norm(h.name) === targetNormName && (!parsedMy.dept || !h.dept || h.dept === parsedMy.dept))
+              getExamCategoryId(h.examCategory) === selectedExamCategory && (
+                (parsedMy.id && h.id === parsedMy.id) ||
+                (parsedMy.idNo && h.idNo === parsedMy.idNo) ||
+                (norm(h.name) === targetNormName && (!parsedMy.dept || !h.dept || h.dept === parsedMy.dept))
+              )
             );
             if (stillExists || !isHistoryLoaded) {
               if (!userRecords.some(ur => (ur.id && ur.id === parsedMy.id) || (ur.date === parsedMy.date && ur.score === parsedMy.score))) {
@@ -1024,12 +1118,16 @@ export default function App() {
         const userMapStr = localStorage.getItem("haccp_user_records_map");
         if (userMapStr) {
           const userMap = JSON.parse(userMapStr);
-          const mapped = userMap[cleanName] || userMap[`${cleanName}_${cleanDept}`];
-          if (mapped) {
+          const mapped = userMap[`${cleanName}_${selectedExamCategory}`]
+            || userMap[`${cleanName}_${cleanDept}_${selectedExamCategory}`]
+            || (selectedExamCategory === 'regular' ? (userMap[cleanName] || userMap[`${cleanName}_${cleanDept}`]) : undefined);
+          if (mapped && getExamCategoryId(mapped.examCategory) === selectedExamCategory) {
             const stillExists = examHistory.some(h => 
-              (mapped.id && h.id === mapped.id) ||
-              (mapped.idNo && h.idNo === mapped.idNo) ||
-              (norm(h.name) === targetNormName && (!mapped.dept || !h.dept || h.dept === mapped.dept))
+              getExamCategoryId(h.examCategory) === selectedExamCategory && (
+                (mapped.id && h.id === mapped.id) ||
+                (mapped.idNo && h.idNo === mapped.idNo) ||
+                (norm(h.name) === targetNormName && (!mapped.dept || !h.dept || h.dept === mapped.dept))
+              )
             );
             if (stillExists || !isHistoryLoaded) {
               if (!userRecords.some(ur => (ur.id && ur.id === mapped.id) || (ur.date === mapped.date && ur.score === mapped.score))) {
@@ -1037,8 +1135,12 @@ export default function App() {
               }
             } else {
               // 초기화되었으므로 제거
-              delete userMap[cleanName];
-              delete userMap[`${cleanName}_${cleanDept}`];
+              delete userMap[`${cleanName}_${selectedExamCategory}`];
+              delete userMap[`${cleanName}_${cleanDept}_${selectedExamCategory}`];
+              if (selectedExamCategory === 'regular') {
+                delete userMap[cleanName];
+                delete userMap[`${cleanName}_${cleanDept}`];
+              }
               localStorage.setItem("haccp_user_records_map", JSON.stringify(userMap));
             }
           }
@@ -1135,7 +1237,7 @@ export default function App() {
       setSecondsElapsed(0);
       setIsSubmitted(false);
       setCurrentCardIndex(0);
-      setShuffledQuestions(haccpQuestions);
+      setShuffledQuestions(getQuestionsByCategory(selectedExamCategory));
       setIsExamStarted(true);
       setIsTimerRunning(true);
     } finally {
@@ -1180,7 +1282,9 @@ export default function App() {
       createdAt: Timestamp.now(),
       isReexam: Boolean(isReexamMode),
       round: isReexamMode ? 2 : 1,
-      reexamApproved: false // 응시 완료 후 기본 상태: 재시험 시 반드시 관리자 승인 필요
+      reexamApproved: false, // 응시 완료 후 기본 상태: 재시험 시 반드시 관리자 승인 필요
+      examCategory: selectedExamCategory,
+      examCategoryLabel: EXAM_CATEGORIES[selectedExamCategory].label
     };
     
     try {
@@ -1190,6 +1294,7 @@ export default function App() {
       // 만약 재시험이었다면 이전 레코드의 reexamApproved도 false로 소진 처리
       if (isReexamMode) {
         const prevRecord = examHistory.find(r => 
+          getExamCategoryId(r.examCategory) === selectedExamCategory &&
           ((r.idNo && r.idNo === cleanIdNo) || (r.name === cleanName && r.dept === cleanDept)) && r.id !== docRef.id
         );
         if (prevRecord && prevRecord.id) {
@@ -1228,8 +1333,12 @@ export default function App() {
     try {
       const userMapStr = localStorage.getItem("haccp_user_records_map") || "{}";
       const userMap = JSON.parse(userMapStr);
-      userMap[cleanName] = newRecord;
-      userMap[`${cleanName}_${cleanDept}`] = newRecord;
+      userMap[`${cleanName}_${selectedExamCategory}`] = newRecord;
+      userMap[`${cleanName}_${cleanDept}_${selectedExamCategory}`] = newRecord;
+      if (selectedExamCategory === 'regular') {
+        userMap[cleanName] = newRecord;
+        userMap[`${cleanName}_${cleanDept}`] = newRecord;
+      }
       localStorage.setItem("haccp_user_records_map", JSON.stringify(userMap));
     } catch {
       // ignore
@@ -1249,6 +1358,9 @@ export default function App() {
     const lastNames = ["김", "이", "박", "최", "정", "강", "조", "윤", "장", "임", "한", "오", "서", "신", "권", "황", "안", "송", "류", "전"];
     const departments = ["양조1팀", "양조2팀", "생산지원팀", "설비기술팀", "품질보증팀", "자연그대로"];
     
+    const targetDummyCategory: ExamCategoryId = examCategoryFilter === 'new_hire_2026_11' ? 'new_hire_2026_11' : 'regular';
+    const targetQuestions = getQuestionsByCategory(targetDummyCategory);
+
     const newSamples: ExamHistory[] = [];
     for (let i = 0; i < count; i++) {
       const dept = departments[Math.floor(Math.random() * departments.length)];
@@ -1259,7 +1371,7 @@ export default function App() {
       const randomId = Math.floor(1000 + Math.random() * 9000);
       
       const mockAnswers: Record<number, number> = {};
-      haccpQuestions.forEach((q) => {
+      targetQuestions.forEach((q) => {
         const isCorrect = Math.random() < (correctCount / 20);
         if (isCorrect) {
           mockAnswers[q.id] = q.correctAnswer;
@@ -1284,7 +1396,9 @@ export default function App() {
         dept: dept,
         idNo: `HS-${sampleYear}-${randomId}`,
         answers: mockAnswers,
-        createdAt: Timestamp.fromDate(dateObj)
+        createdAt: Timestamp.fromDate(dateObj),
+        examCategory: targetDummyCategory,
+        examCategoryLabel: EXAM_CATEGORIES[targetDummyCategory].label
       });
     }
 
@@ -1611,15 +1725,25 @@ export default function App() {
   };
 
   const downloadExcelReport = () => {
-    if (examHistory.length === 0) return;
+    const filteredForExport = examHistory.filter(r => {
+      const rYear = r.year || (r.date ? parseInt(r.date.split('-')[0], 10) : new Date().getFullYear());
+      const matchesYear = yearFilter === 'all' ? true : rYear === parseInt(yearFilter, 10);
+      const matchesCat = examCategoryFilter === 'all' ? true : getExamCategoryId(r.examCategory) === examCategoryFilter;
+      return matchesYear && matchesCat;
+    });
+    if (filteredForExport.length === 0) {
+      showAdminToast("내보낼 평가 기록이 없습니다.", "info");
+      return;
+    }
 
     // 인원별(사원별) 1차 및 2차 시험 결과 그룹화
-    const personSummaries = groupExamsByPerson(examHistory);
+    const personSummaries = groupExamsByPerson(filteredForExport);
     // 가나다 성명순 정렬
     personSummaries.sort((a, b) => (a.name || "").localeCompare(b.name || "", "ko"));
 
     const headers = [
       "연도",
+      "평가 과정",
       "성명",
       "소속 부서/팀",
       "수험 번호",
@@ -1642,6 +1766,8 @@ export default function App() {
 
     personSummaries.forEach(person => {
       const recYear = person.year || new Date().getFullYear();
+      const catLabel = EXAM_CATEGORIES[person.examCategory]?.label || "2026년도 평가";
+      const personQuestions = getQuestionsByCategory(person.examCategory);
       const idNo = person.idNo || `HS-${recYear}-미부여`;
       const name = person.name || "성명 미입력";
       const dept = person.dept || "부서 미지정";
@@ -1655,7 +1781,7 @@ export default function App() {
       else finalStatusText = "1차 불합격 (승인 대기)";
 
       // ----------------------------------------------------
-      // ROW 1: 1차 정기평가 행
+      // ROW 1: 1차 평가 행
       // ----------------------------------------------------
       const first = person.firstExam;
       const has1st = Boolean(first);
@@ -1667,10 +1793,11 @@ export default function App() {
 
       const firstRow = [
         `"${recYear}년"`,
+        `"${catLabel}"`,
         `"${name.replace(/"/g, '""')}"`,
         `"${dept.replace(/"/g, '""')}"`,
         `"${idNo}"`,
-        `"1차 정기평가"`,
+        `"1차 평가"`,
         has1st ? `"${firstDate}"` : `"미응시"`,
         has1st ? `"${firstScore}점"` : `"-"`,
         has1st ? `"${firstPassed ? "1차 합격" : "재평가 대상 (불합격)"}"` : `"미응시"`,
@@ -1681,7 +1808,7 @@ export default function App() {
       ];
 
       for (let i = 1; i <= 20; i++) {
-        const q = haccpQuestions.find(question => question.id === i);
+        const q = personQuestions.find(question => question.id === i);
         const userAns = first?.answers ? first.answers[i] : undefined;
         if (userAns === undefined) {
           firstRow.push(`"-"`, `"-"`);
@@ -1708,6 +1835,7 @@ export default function App() {
 
         const secondRow = [
           `"${recYear}년"`,
+          `"${catLabel}"`,
           `"${name.replace(/"/g, '""')}"`,
           `"${dept.replace(/"/g, '""')}"`,
           `"${idNo}"`,
@@ -1722,7 +1850,7 @@ export default function App() {
         ];
 
         for (let i = 1; i <= 20; i++) {
-          const q = haccpQuestions.find(question => question.id === i);
+          const q = personQuestions.find(question => question.id === i);
           const userAns = second?.answers ? second.answers[i] : undefined;
           if (userAns === undefined) {
             secondRow.push(`"-"`, `"-"`);
@@ -1749,6 +1877,7 @@ export default function App() {
 
         const secondRow = [
           `"${recYear}년"`,
+          `"${catLabel}"`,
           `"${name.replace(/"/g, '""')}"`,
           `"${dept.replace(/"/g, '""')}"`,
           `"${idNo}"`,
@@ -1775,7 +1904,8 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    link.setAttribute("download", `국순당_HACCP_평가결과보고서_(1차·2차_행구분)_${new Date().toISOString().split('T')[0]}.csv`);
+    const exportSuffix = examCategoryFilter === 'new_hire_2026_11' ? '_2026년_신입사원(11월)' : '';
+    link.setAttribute("download", `국순당_HACCP_평가결과보고서${exportSuffix}_${new Date().toISOString().split('T')[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -1939,7 +2069,7 @@ export default function App() {
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지 - 국순당</title>
+          <title>${examPaperCategory === 'new_hire_2026_11' ? EXAM_CATEGORIES.new_hire_2026_11.paperTitle : `${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지`} - 국순당</title>
           <style>
             ${printStyles}
           </style>
@@ -1947,7 +2077,7 @@ export default function App() {
         <body>
           <div class="no-print-toolbar">
             <div>
-              <strong style="font-size: 15px; color: #0f172a;">${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지 (양면 1장)</strong>
+              <strong style="font-size: 15px; color: #0f172a;">${examPaperCategory === 'new_hire_2026_11' ? EXAM_CATEGORIES.new_hire_2026_11.paperTitle : `${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지`} (양면 1장)</strong>
               <div style="font-size: 12px; color: #64748b; margin-top: 2px;">
                 첫번째 장(앞면: 1~10번) · 두번째 장(뒷면: 11~20번) 가독성 및 A4 규격 최적화
               </div>
@@ -2088,7 +2218,7 @@ export default function App() {
             <html lang="ko">
             <head>
               <meta charset="utf-8">
-              <title>${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지 - 국순당</title>
+              <title>${examPaperCategory === 'new_hire_2026_11' ? EXAM_CATEGORIES.new_hire_2026_11.paperTitle : `${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지`} - 국순당</title>
               <style>
                 ${printStyles}
                 .no-print-btn {
@@ -2146,7 +2276,7 @@ export default function App() {
             <html lang="ko">
             <head>
               <meta charset="utf-8">
-              <title>${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지 - 국순당</title>
+              <title>${examPaperCategory === 'new_hire_2026_11' ? EXAM_CATEGORIES.new_hire_2026_11.paperTitle : `${examPaperYear}년도 HACCP 정기 위생교육 평가 시험지`} - 국순당</title>
               <style>
                 ${printStyles}
               </style>
@@ -2204,8 +2334,17 @@ export default function App() {
       showAdminToast("가독성을 높인 A4 양면 1장 규격 PDF 파일을 생성 중입니다...", "info");
 
       const yearText = examPaperYear || new Date().getFullYear().toString();
+      const paperMeta = EXAM_CATEGORIES[examPaperCategory];
+      const paperQuestions = getQuestionsByCategory(examPaperCategory);
+      const paperTitleText = examPaperCategory === 'new_hire_2026_11'
+        ? paperMeta.paperTitle
+        : `${yearText}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지`;
+      const paperShortTitleText = examPaperCategory === 'new_hire_2026_11'
+        ? paperMeta.paperTitle
+        : `${yearText}년도 HACCP 정기 위생교육 평가 시험지`;
+      const paperFileSuffix = examPaperCategory === 'new_hire_2026_11' ? '_2026년_신입사원(11월)' : '';
       const isTeacher = examPaperType === 'teacher';
-      const fileName = `${yearText}년도_국순당_HACCP_위생교육_평가시험지(양면1장)${isTeacher ? '_정답해설지' : ''}.pdf`;
+      const fileName = `${yearText}년도_국순당_HACCP_위생교육_평가시험지${paperFileSuffix}(양면1장)${isTeacher ? '_정답해설지' : ''}.pdf`;
       const circleChars = ['①', '②', '③', '④', '⑤'];
 
       const renderQuestionsPdf = (questions: typeof haccpQuestions, startIndex: number, isPage2: boolean = false) => {
@@ -2261,7 +2400,7 @@ export default function App() {
                 KOOKSOONDANG | 주식회사 국순당 횡성양조장
               </div>
               <h1 style="font-size: 18px; font-weight: bold; margin: 0 0 3px 0; color: #111827; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
-                ${yearText}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지
+                ${paperTitleText}
               </h1>
               <div style="font-size: 11px; color: #4b5563; font-weight: bold;">
                 주관 부서: 품질보증팀 &nbsp;|&nbsp; ${isTeacher ? '[ 관리자용 정답 및 해설지 (제 1 면 - 앞면: 1~10번) ]' : '[ 수험생 응시용 문제지 (제 1 면 - 앞면: 1~10번) ]'}
@@ -2296,10 +2435,10 @@ export default function App() {
             <div style="display: grid; grid-template-columns: 1fr 1fr; column-gap: 24px; position: relative;">
               <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #cbd5e1; transform: translateX(-50%);"></div>
               <div style="padding-right: 10px;">
-                ${renderQuestionsPdf(haccpQuestions.slice(0, 5), 0, false)}
+                ${renderQuestionsPdf(paperQuestions.slice(0, 5), 0, false)}
               </div>
               <div style="padding-left: 10px;">
-                ${renderQuestionsPdf(haccpQuestions.slice(5, 10), 5, false)}
+                ${renderQuestionsPdf(paperQuestions.slice(5, 10), 5, false)}
               </div>
             </div>
           </div>
@@ -2314,7 +2453,7 @@ export default function App() {
           <div>
             <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1.5px solid #1f2937; padding-bottom: 4px; margin-bottom: 12px; font-size: 11px; font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;">
               <span style="font-weight: bold; font-size: 12.5px; color: #111827;">
-                ${yearText}년도 HACCP 정기 위생교육 평가 시험지 (제 2 면 - 뒷면: 11~20번)
+                ${paperShortTitleText} (제 2 면 - 뒷면: 11~20번)
               </span>
               <span style="font-weight: bold; color: #374151;">성명: __________________ &nbsp;&nbsp; 소속: __________________</span>
             </div>
@@ -2322,10 +2461,10 @@ export default function App() {
             <div style="display: grid; grid-template-columns: 1fr 1fr; column-gap: 24px; position: relative;">
               <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #cbd5e1; transform: translateX(-50%);"></div>
               <div style="padding-right: 10px;">
-                ${renderQuestionsPdf(haccpQuestions.slice(10, 15), 10, true)}
+                ${renderQuestionsPdf(paperQuestions.slice(10, 15), 10, true)}
               </div>
               <div style="padding-left: 10px;">
-                ${renderQuestionsPdf(haccpQuestions.slice(15, 20), 15, true)}
+                ${renderQuestionsPdf(paperQuestions.slice(15, 20), 15, true)}
               </div>
             </div>
 
@@ -2389,7 +2528,12 @@ export default function App() {
   // 3. 시험지 DOC 파일 저장 (Word 전용: A4 양면 1장 2단 다단 완벽 2페이지 최적화 / 굴림체 / 문항 간 공백 추가 및 가독성 꽉 차도록 조절)
   const handleDownloadExamDoc = () => {
     const yearText = examPaperYear || new Date().getFullYear().toString();
-    const title = `${yearText}년도 국순당 HACCP 및 선행요건 정기 위생교육 평가 시험지`;
+    const paperMeta = EXAM_CATEGORIES[examPaperCategory];
+    const paperQuestions = getQuestionsByCategory(examPaperCategory);
+    const paperFileSuffix = examPaperCategory === 'new_hire_2026_11' ? '_2026년_신입사원(11월)' : '';
+    const title = examPaperCategory === 'new_hire_2026_11'
+      ? `국순당 ${paperMeta.paperTitle}`
+      : `${yearText}년도 국순당 HACCP 및 선행요건 정기 위생교육 평가 시험지`;
     const isTeacher = examPaperType === 'teacher';
     const circleChars = ['①', '②', '③', '④', '⑤'];
 
@@ -2574,11 +2718,11 @@ export default function App() {
           <tr>
             <td class="q-col-left">
               <!-- Q 1 ~ 5 -->
-              ${renderWordQuestions(haccpQuestions.slice(0, 5), 0)}
+              ${renderWordQuestions(paperQuestions.slice(0, 5), 0)}
             </td>
             <td class="q-col-right">
               <!-- Q 6 ~ 10 -->
-              ${renderWordQuestions(haccpQuestions.slice(5, 10), 5)}
+              ${renderWordQuestions(paperQuestions.slice(5, 10), 5)}
             </td>
           </tr>
         </table>
@@ -2594,7 +2738,7 @@ export default function App() {
         <table width="100%" class="page2-header" cellpadding="0" cellspacing="0">
           <tr>
             <td align="left" style="font-size: 10pt; font-weight: bold; color: #111111;">
-              ${yearText}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지 (제 2 면 - 뒷면: 11~20번)
+              ${examPaperCategory === 'new_hire_2026_11' ? paperMeta.paperTitle : `${yearText}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지`} (제 2 면 - 뒷면: 11~20번)
             </td>
             <td align="right" style="font-size: 9pt; font-weight: bold; color: #333333;">
               성명: _______________ &nbsp;&nbsp; 소속: _______________
@@ -2606,11 +2750,11 @@ export default function App() {
           <tr>
             <td class="q-col-left">
               <!-- Q 11 ~ 15 -->
-              ${renderWordQuestions(haccpQuestions.slice(10, 15), 10)}
+              ${renderWordQuestions(paperQuestions.slice(10, 15), 10)}
             </td>
             <td class="q-col-right">
               <!-- Q 16 ~ 20 -->
-              ${renderWordQuestions(haccpQuestions.slice(15, 20), 15)}
+              ${renderWordQuestions(paperQuestions.slice(15, 20), 15)}
             </td>
           </tr>
         </table>
@@ -2631,7 +2775,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${yearText}년도_국순당_HACCP_위생교육_평가시험지(양면1장)${isTeacher ? '_해답지' : ''}.doc`;
+    a.download = `${yearText}년도_국순당_HACCP_위생교육_평가시험지${paperFileSuffix}(양면1장)${isTeacher ? '_해답지' : ''}.doc`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -2642,15 +2786,21 @@ export default function App() {
   // 시험지 TXT 파일 저장
   const handleDownloadExamTxt = () => {
     const yearText = examPaperYear || new Date().getFullYear().toString();
+    const paperMeta = EXAM_CATEGORIES[examPaperCategory];
+    const paperQuestions = getQuestionsByCategory(examPaperCategory);
+    const paperTitleText = examPaperCategory === 'new_hire_2026_11'
+      ? paperMeta.paperTitle
+      : `${yearText}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지`;
+    const paperFileSuffix = examPaperCategory === 'new_hire_2026_11' ? '_2026년_신입사원(11월)' : '';
     let txt = `=================================================================\n`;
-    txt += `[국순당 횡성양조장] ${yearText}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지\n`;
-    txt += `주관 부서: 품질보증팀 | 대상: 전 임직원 및 작업자 (합격기준: 70점 이상)\n`;
+    txt += `[국순당 횡성양조장] ${paperTitleText}\n`;
+    txt += `주관 부서: 품질보증팀 | 대상: ${examPaperCategory === 'new_hire_2026_11' ? '신입사원' : '전 임직원 및 작업자'} (합격기준: 70점 이상)\n`;
     txt += `=================================================================\n`;
     txt += `소속: _______________   성명: _______________   일자: ${yearText}년 ___월 ___일\n`;
     txt += `점수: _____점 / 100점    판정: [ 합격 / 불합격 ]   확인: 품질보증팀장 (인)\n`;
     txt += `-----------------------------------------------------------------\n\n`;
 
-    haccpQuestions.forEach((q, idx) => {
+    paperQuestions.forEach((q, idx) => {
       txt += `${idx + 1}. ${q.text}\n`;
       q.options.forEach((opt, oIdx) => {
         txt += `   ${oIdx + 1}) ${opt}${examPaperType === 'teacher' && q.correctAnswer === oIdx + 1 ? ' [★ 정답]' : ''}\n`;
@@ -2665,7 +2815,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${yearText}년도_국순당_HACCP_위생교육_평가시험지${examPaperType === 'teacher' ? '_해답지' : ''}.txt`;
+    a.download = `${yearText}년도_국순당_HACCP_위생교육_평가시험지${paperFileSuffix}${examPaperType === 'teacher' ? '_해답지' : ''}.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -2900,7 +3050,12 @@ service cloud.firestore {
 
             {/* Pending Reexam Notification Banner */}
             {(() => {
-              const pendingCount = examHistory.filter(r => r.score < passingScoreThreshold && !r.reexamApproved).length;
+              const pendingCount = examHistory.filter(r => {
+                const recordYear = r.year || (r.date ? parseInt(r.date.split('-')[0], 10) : new Date().getFullYear());
+                const matchesYear = yearFilter === 'all' ? true : recordYear === parseInt(yearFilter, 10);
+                const matchesCat = examCategoryFilter === 'all' ? true : getExamCategoryId(r.examCategory) === examCategoryFilter;
+                return matchesYear && matchesCat && r.score < passingScoreThreshold && !r.reexamApproved;
+              }).length;
               if (pendingCount > 0 && statusFilter !== 'reexam_pending') {
                 return (
                   <div className="bg-amber-50/90 border border-amber-200 p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
@@ -2952,7 +3107,9 @@ service cloud.firestore {
 
               const yearFilteredHistory = examHistory.filter(record => {
                 const recordYear = record.year || (record.date ? parseInt(record.date.split('-')[0], 10) : new Date().getFullYear());
-                return yearFilter === 'all' ? true : recordYear === parseInt(yearFilter, 10);
+                const matchesYear = yearFilter === 'all' ? true : recordYear === parseInt(yearFilter, 10);
+                const matchesCat = examCategoryFilter === 'all' ? true : getExamCategoryId(record.examCategory) === examCategoryFilter;
+                return matchesYear && matchesCat;
               });
 
               const total = yearFilteredHistory.length;
@@ -2968,7 +3125,9 @@ service cloud.firestore {
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                   <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-xs flex items-center justify-between">
                     <div>
-                      <span className="text-xs text-stone-400 block font-sans font-medium">총 응시 건수 {yearFilter !== 'all' ? `(${yearFilter}년도)` : ''}</span>
+                      <span className="text-xs text-stone-400 block font-sans font-medium">
+                        총 응시 건수 {yearFilter !== 'all' ? `(${yearFilter}년도)` : ''}{examCategoryFilter !== 'all' ? ` · ${EXAM_CATEGORIES[examCategoryFilter].label}` : ''}
+                      </span>
                       <span className="text-2xl font-mono font-bold text-stone-800 block mt-1">{total}건</span>
                     </div>
                     <div className="p-3 bg-stone-50 rounded-xl text-stone-500">
@@ -3053,6 +3212,18 @@ service cloud.firestore {
                         ))}
                       </select>
 
+                      {/* Exam Category Filter Dropdown (정기평가 / 2026년 신입사원(11월) 구분) */}
+                      <select
+                        value={examCategoryFilter}
+                        onChange={e => setExamCategoryFilter(e.target.value as 'all' | ExamCategoryId)}
+                        className="px-3 py-2 bg-indigo-50/80 border border-indigo-200 rounded-xl text-xs text-indigo-950 font-bold focus:outline-hidden focus:ring-2 focus:ring-indigo-700 cursor-pointer"
+                        aria-label="평가 과정 구분 선택"
+                      >
+                        <option value="all">📋 전체 과정 (통합)</option>
+                        <option value="regular">2026년도 정기평가</option>
+                        <option value="new_hire_2026_11">2026년 신입사원(11월)</option>
+                      </select>
+
                       <select
                         value={statusFilter}
                         onChange={e => setStatusFilter(e.target.value as any)}
@@ -3062,8 +3233,8 @@ service cloud.firestore {
                         <option value="passed">합격 (70점 이상)</option>
                         <option value="reexam">재평가 대상 (50점 ~ 69점)</option>
                         <option value="retrain">재교육+재평가 대상 (50점 미만)</option>
-                        <option value="reexam_pending">⏳ 재시험 승인 대기자 ({examHistory.filter(r => r.score < passingScoreThreshold && !r.reexamApproved).length}명)</option>
-                        <option value="reexam_approved">✅ 재시험 승인 완료자 ({examHistory.filter(r => r.score < passingScoreThreshold && r.reexamApproved).length}명)</option>
+                        <option value="reexam_pending">⏳ 재시험 승인 대기자 ({examHistory.filter(r => (examCategoryFilter === 'all' || getExamCategoryId(r.examCategory) === examCategoryFilter) && r.score < passingScoreThreshold && !r.reexamApproved).length}명)</option>
+                        <option value="reexam_approved">✅ 재시험 승인 완료자 ({examHistory.filter(r => (examCategoryFilter === 'all' || getExamCategoryId(r.examCategory) === examCategoryFilter) && r.score < passingScoreThreshold && r.reexamApproved).length}명)</option>
                       </select>
                     </div>
                     
@@ -3071,6 +3242,7 @@ service cloud.firestore {
                       <button
                         onClick={() => {
                           setExamPaperYear(yearFilter === 'all' ? new Date().getFullYear().toString() : yearFilter);
+                          setExamPaperCategory(examCategoryFilter === 'new_hire_2026_11' ? 'new_hire_2026_11' : 'regular');
                           setShowExamPaperModal(true);
                         }}
                         className="px-4 py-2 bg-stone-800 hover:bg-stone-900 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
@@ -3082,7 +3254,9 @@ service cloud.firestore {
 
                       <button
                         onClick={() => {
-                          setQrUrl(getPublicShareUrl());
+                          const targetQrCat: ExamCategoryId = examCategoryFilter === 'new_hire_2026_11' ? 'new_hire_2026_11' : 'regular';
+                          setQrExamCategory(targetQrCat);
+                          setQrUrl(getPublicShareUrl(targetQrCat));
                           setShowQrModal(true);
                         }}
                         className="px-4 py-2 bg-[#0F5A3E] hover:bg-emerald-800 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
@@ -3155,6 +3329,9 @@ service cloud.firestore {
                   
                 const matchesYear = 
                   yearFilter === 'all' ? true : person.year === parseInt(yearFilter, 10);
+
+                const matchesCategory =
+                  examCategoryFilter === 'all' ? true : person.examCategory === examCategoryFilter;
                   
                 const matchesStatus = 
                   statusFilter === 'all' ? true :
@@ -3164,7 +3341,7 @@ service cloud.firestore {
                   statusFilter === 'reexam_pending' ? person.finalStatus === 'reexam_pending' :
                   statusFilter === 'reexam_approved' ? person.finalStatus === 'reexam_ready' : true;
 
-                return matchesSearch && matchesYear && matchesStatus;
+                return matchesSearch && matchesYear && matchesCategory && matchesStatus;
               });
 
               // 2) 시간순 개별 기록 필터링
@@ -3187,8 +3364,11 @@ service cloud.firestore {
 
                 const matchesYear = 
                   yearFilter === 'all' ? true : recordYear === parseInt(yearFilter, 10);
+
+                const matchesCategory =
+                  examCategoryFilter === 'all' ? true : getExamCategoryId(record.examCategory) === examCategoryFilter;
                   
-                return matchesSearch && matchesStatus && matchesYear;
+                return matchesSearch && matchesStatus && matchesYear && matchesCategory;
               });
 
               return (
@@ -3622,6 +3802,13 @@ service cloud.firestore {
                               <span className="text-[10px] bg-stone-100 text-stone-600 px-2 py-0.5 rounded-md font-bold font-mono">
                                 {recYear}년도
                               </span>
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${
+                                getExamCategoryId(record.examCategory) === 'new_hire_2026_11'
+                                  ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                                  : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                              }`}>
+                                {EXAM_CATEGORIES[getExamCategoryId(record.examCategory)].label}
+                              </span>
                               {record.isReexam && (
                                 <span className="text-[10px] bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-md font-bold">
                                   2차 재시험
@@ -3785,7 +3972,7 @@ service cloud.firestore {
                             </div>
 
                             <div className="grid grid-cols-5 sm:grid-cols-10 gap-2">
-                              {haccpQuestions.map(q => {
+                              {getQuestionsByCategory(record.examCategory).map(q => {
                                 const userAns = record.answers?.[q.id];
                                 const isCorrect = userAns === q.correctAnswer;
 
@@ -3838,37 +4025,49 @@ service cloud.firestore {
                       국순당 횡성양조장
                     </h1>
                   </div>
-                  <h2 className="font-serif text-lg text-emerald-100/90 mt-1">{new Date().getFullYear()}년도 HACCP 내부평가</h2>
-                  <div className="mt-2.5 flex justify-center">
+                  <h2 className="font-serif text-lg text-emerald-100/90 mt-1">
+                    {EXAM_CATEGORIES[selectedExamCategory].onboardingTitle}
+                  </h2>
+                  <div className="mt-2.5 flex justify-center gap-2 flex-wrap">
                     <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-white/15 border border-white/25 rounded-full text-xs font-semibold text-emerald-50 shadow-2xs">
                       <Shield size={13} className="text-emerald-300" />
                       주관 부서: 품질보증팀
                     </span>
+                    {selectedExamCategory === 'new_hire_2026_11' && (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-indigo-500/30 border border-indigo-300/40 rounded-full text-xs font-bold text-white shadow-2xs">
+                        신입사원 교육과정
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-emerald-200/80 mt-3 max-w-md mx-auto leading-relaxed">
-                    본 평가는 국순당 횡성양조장 품질보증팀 주관으로 전 임직원의 위생 품질과 HACCP 관리 프로세스를 점검하기 위해 실시되는 내부 필수 평가입니다.
+                    본 평가는 국순당 횡성양조장 품질보증팀 주관으로 {selectedExamCategory === 'new_hire_2026_11' ? '신입사원의' : '전 임직원의'} 위생 품질과 HACCP 관리 프로세스를 점검하기 위해 실시되는 내부 필수 평가입니다.
                   </p>
                 </div>
 
-                {myLocalExamRecord !== null && (!isHistoryLoaded || examHistory.some(r => 
-                  (myLocalExamRecord.id && r.id === myLocalExamRecord.id) ||
-                  (myLocalExamRecord.idNo && r.idNo === myLocalExamRecord.idNo) ||
-                  (r.name === myLocalExamRecord.name && r.dept === myLocalExamRecord.dept)
-                )) ? (() => {
-                  const latestRecord = examHistory.find(r => 
+                {myLocalExamRecord !== null && getExamCategoryId(myLocalExamRecord.examCategory) === selectedExamCategory && (!isHistoryLoaded || examHistory.some(r => 
+                  getExamCategoryId(r.examCategory) === selectedExamCategory && (
                     (myLocalExamRecord.id && r.id === myLocalExamRecord.id) ||
                     (myLocalExamRecord.idNo && r.idNo === myLocalExamRecord.idNo) ||
                     (r.name === myLocalExamRecord.name && r.dept === myLocalExamRecord.dept)
+                  )
+                )) ? (() => {
+                  const latestRecord = examHistory.find(r => 
+                    getExamCategoryId(r.examCategory) === selectedExamCategory && (
+                      (myLocalExamRecord.id && r.id === myLocalExamRecord.id) ||
+                      (myLocalExamRecord.idNo && r.idNo === myLocalExamRecord.idNo) ||
+                      (r.name === myLocalExamRecord.name && r.dept === myLocalExamRecord.dept)
+                    )
                   ) || myLocalExamRecord;
 
                   const norm = (s?: string) => (s || "").replace(/\s+/g, "").trim().toLowerCase();
                   const targetNormName = norm(latestRecord.name);
 
-                  const isCandidatePassed = latestRecord.score >= passingScoreThreshold || examHistory.some(r => norm(r.name) === targetNormName && r.score >= passingScoreThreshold);
+                  const isCandidatePassed = latestRecord.score >= passingScoreThreshold || examHistory.some(r => getExamCategoryId(r.examCategory) === selectedExamCategory && norm(r.name) === targetNormName && r.score >= passingScoreThreshold);
                   const isReexamApproved = Boolean(
                     latestRecord.reexamApproved || 
                     myLocalExamRecord?.reexamApproved || 
                     examHistory.some(r => 
+                      getExamCategoryId(r.examCategory) === selectedExamCategory &&
                       ((latestRecord.id && r.id === latestRecord.id) || 
                        (latestRecord.idNo && r.idNo === latestRecord.idNo) || 
                        (targetNormName && norm(r.name) === targetNormName)) && 
@@ -3883,7 +4082,7 @@ service cloud.firestore {
                         <div className="bg-emerald-50 text-emerald-900 text-xs p-4 rounded-xl border border-emerald-200 flex items-start gap-3 leading-relaxed">
                           <CheckCircle2 className="text-emerald-700 shrink-0 mt-0.5" size={20} />
                           <div className="space-y-1">
-                            <p className="font-bold text-emerald-950 text-sm">2026년도 HACCP 내부평가 최종 합격</p>
+                            <p className="font-bold text-emerald-950 text-sm">{EXAM_CATEGORIES[selectedExamCategory].onboardingTitle} 최종 합격</p>
                             <p className="text-emerald-800">
                               귀하는 종합 점수 <strong className="font-bold text-emerald-950 font-mono">{latestRecord.score}점</strong>으로 합격 기준({passingScoreThreshold}점)을 충족하여 우수한 성적으로 평가를 완료하셨습니다.
                             </p>
@@ -3976,7 +4175,7 @@ service cloud.firestore {
                                 className="w-full py-3.5 bg-[#0F5A3E] hover:bg-emerald-800 text-white font-bold text-sm rounded-xl shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
                               >
                                 <FileCheck size={18} />
-                                {new Date().getFullYear()}년도 HACCP 재시험 시작하기
+                                {selectedExamCategory === 'new_hire_2026_11' ? '2026년 신입사원(11월) HACCP 재시험 시작하기' : `${new Date().getFullYear()}년도 HACCP 재시험 시작하기`}
                               </button>
                             </div>
                           ) : (
@@ -3999,12 +4198,15 @@ service cloud.firestore {
                                   const targetNorm = norm(targetName);
 
                                   const updatedRec = refreshed.find(r => 
-                                    (targetId && r.id === targetId) ||
-                                    (targetIdNo && r.idNo === targetIdNo) ||
-                                    (targetNorm && norm(r.name) === targetNorm)
+                                    getExamCategoryId(r.examCategory) === selectedExamCategory && (
+                                      (targetId && r.id === targetId) ||
+                                      (targetIdNo && r.idNo === targetIdNo) ||
+                                      (targetNorm && norm(r.name) === targetNorm)
+                                    )
                                   );
 
                                   const isAnyApproved = refreshed.some(r => 
+                                    getExamCategoryId(r.examCategory) === selectedExamCategory &&
                                     ((targetId && r.id === targetId) ||
                                      (targetIdNo && r.idNo === targetIdNo) ||
                                      (targetNorm && norm(r.name) === targetNorm)) &&
@@ -4141,6 +4343,31 @@ service cloud.firestore {
 
                     <div className="space-y-3.5">
                       <div>
+                        <label className="block text-xs font-semibold text-stone-600 mb-1">평가 과정 구분</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400 pointer-events-none">
+                            <FileText size={16} />
+                          </span>
+                          <select
+                            value={selectedExamCategory}
+                            onChange={e => {
+                              const cat = getExamCategoryId(e.target.value);
+                              setSelectedExamCategory(cat);
+                              setShuffledQuestions(getQuestionsByCategory(cat));
+                              setStartExamError(null);
+                            }}
+                            className="w-full pl-9 pr-10 py-2.5 bg-emerald-50/50 border border-emerald-200 rounded-xl text-sm font-semibold focus:outline-hidden focus:ring-2 focus:ring-emerald-800 focus:bg-white transition-all appearance-none cursor-pointer text-emerald-950"
+                          >
+                            <option value="regular">2026년도 HACCP 정기평가 (전 임직원)</option>
+                            <option value="new_hire_2026_11">2026년 신입사원(11월)</option>
+                          </select>
+                          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 pointer-events-none">
+                            <ChevronDown size={16} />
+                          </span>
+                        </div>
+                      </div>
+
+                      <div>
                         <label className="block text-xs font-semibold text-stone-600 mb-1">성명</label>
                         <div className="relative">
                           <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400">
@@ -4246,7 +4473,8 @@ service cloud.firestore {
                       <button
                         type="button"
                         onClick={() => {
-                          setQrUrl(getPublicShareUrl());
+                          setQrExamCategory(selectedExamCategory);
+                          setQrUrl(getPublicShareUrl(selectedExamCategory));
                           setShowQrModal(true);
                         }}
                         className="flex items-center gap-1.5 text-xs text-[#0F5A3E] hover:text-emerald-900 font-semibold transition-all py-1.5 px-3.5 bg-emerald-50/70 hover:bg-emerald-50 rounded-lg cursor-pointer"
@@ -4399,12 +4627,14 @@ service cloud.firestore {
                         {(() => {
                           const norm = (s?: string) => (s || "").replace(/\s+/g, "").trim().toLowerCase();
                           const targetNorm = norm(examinee.name || myLocalExamRecord?.name);
+                          const currentCat = getExamCategoryId(myLocalExamRecord?.examCategory || selectedExamCategory);
 
                           const isSubmissionApprovedForReexam = !isPassed && Boolean(
                             myLocalExamRecord?.reexamApproved || 
                             examHistory.some(r => 
+                              getExamCategoryId(r.examCategory) === currentCat &&
                               ((myLocalExamRecord?.id && r.id === myLocalExamRecord.id) || 
-                               (myLocalExamRecord?.idNo && r.idNo === myLocalExamRecord.idNo) ||
+                               (myLocalExamRecord?.idNo && r.idNo === myLocalExamRecord.idNo) || 
                                (targetNorm && norm(r.name) === targetNorm)) && 
                               r.reexamApproved
                             )
@@ -4430,7 +4660,7 @@ service cloud.firestore {
                                     className="w-full sm:w-auto px-6 py-3 bg-[#0F5A3E] hover:bg-emerald-800 text-white text-xs font-bold rounded-xl transition-all inline-flex items-center justify-center gap-2 cursor-pointer shadow-md active:scale-98"
                                   >
                                     <FileCheck size={16} />
-                                    2026년도 HACCP 2차 재시험 바로 시작하기
+                                    {currentCat === 'new_hire_2026_11' ? '2026년 신입사원(11월) HACCP 2차 재시험 바로 시작하기' : '2026년도 HACCP 2차 재시험 바로 시작하기'}
                                   </button>
                                 </div>
                               </div>
@@ -4472,7 +4702,9 @@ service cloud.firestore {
                                       const refreshed = await fetchExamHistoryOnce();
                                       const cleanName = (examinee.name || myLocalExamRecord?.name || "").trim();
                                       const cleanNorm = norm(cleanName);
+                                      const currentCat = getExamCategoryId(myLocalExamRecord?.examCategory || selectedExamCategory);
                                       const approved = refreshed.some(r => 
+                                        getExamCategoryId(r.examCategory) === currentCat &&
                                         ((myLocalExamRecord?.id && r.id === myLocalExamRecord.id) ||
                                          (myLocalExamRecord?.idNo && r.idNo === myLocalExamRecord.idNo) ||
                                          (cleanNorm && norm(r.name) === cleanNorm)) && 
@@ -4595,7 +4827,9 @@ service cloud.firestore {
                         <div className="flex flex-col md:flex-row items-center justify-between gap-4 border-b-2 border-stone-350 pb-4 mb-4">
                           <KooksoondangLogo />
                           <div className="text-center font-serif">
-                            <span className="text-[11px] tracking-widest text-stone-400 block font-sans">2026년도</span>
+                            <span className="text-[11px] tracking-widest text-stone-400 block font-sans">
+                              {selectedExamCategory === 'new_hire_2026_11' ? '2026년 신입사원(11월)' : '2026년도'}
+                            </span>
                             <h2 className="text-xl md:text-2xl font-bold text-stone-900 tracking-tight">HACCP 내부평가</h2>
                           </div>
                           <div className="w-10 h-10 hidden md:block" /> {/* spacer for balance */}
@@ -4631,7 +4865,7 @@ service cloud.firestore {
 
                       {/* QUESTIONS LIST */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-10">
-                        {shuffledQuestions.map((q, idx) => {
+                        {activeQuestions.map((q, idx) => {
                           const isCorrect = answers[q.id] === q.correctAnswer;
                           const hasAnswered = answers[q.id] !== undefined;
 
@@ -4768,7 +5002,7 @@ service cloud.firestore {
 
                       {/* Render Current Single Question Card */}
                       {(() => {
-                        const q = shuffledQuestions[currentCardIndex];
+                        const q = activeQuestions[currentCardIndex];
                         const isCorrect = answers[q.id] === q.correctAnswer;
                         const hasAnswered = answers[q.id] !== undefined;
 
@@ -4863,7 +5097,7 @@ service cloud.firestore {
                                 {currentCardIndex + 1} / 20
                               </span>
 
-                              {currentCardIndex < shuffledQuestions.length - 1 ? (
+                              {currentCardIndex < activeQuestions.length - 1 ? (
                                 <button
                                   type="button"
                                   onClick={() => setCurrentCardIndex(prev => prev + 1)}
@@ -4913,7 +5147,7 @@ service cloud.firestore {
                       </div>
                       <div className="flex justify-between">
                         <span className="text-stone-400">응시 구분</span>
-                        <span className="text-emerald-800 font-semibold">정기 HACCP 교육시험</span>
+                        <span className="text-emerald-800 font-semibold">{EXAM_CATEGORIES[selectedExamCategory].label}</span>
                       </div>
                     </div>
                   </div>
@@ -4932,7 +5166,7 @@ service cloud.firestore {
 
                     {/* OMR Questions Container */}
                     <div className="flex-1 overflow-y-auto space-y-2.5 max-h-[450px] pr-1 scrollbar-thin">
-                      {shuffledQuestions.map((q, idx) => {
+                      {activeQuestions.map((q, idx) => {
                         const selectedNum = answers[q.id];
                         const isCorrect = answers[q.id] === q.correctAnswer;
 
@@ -5322,7 +5556,14 @@ service cloud.firestore {
                           ? 'bg-indigo-500/30 text-indigo-200 border border-indigo-400/40'
                           : 'bg-emerald-500/30 text-emerald-200 border border-emerald-400/40'
                       }`}>
-                        {selectedHistoryDetail.round === 2 || selectedHistoryDetail.isReexam ? '2차 재시험' : '1차 정기평가'}
+                        {selectedHistoryDetail.round === 2 || selectedHistoryDetail.isReexam ? '2차 재시험' : '1차 평가'}
+                      </span>
+                      <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${
+                        getExamCategoryId(selectedHistoryDetail.examCategory) === 'new_hire_2026_11'
+                          ? 'bg-amber-500/20 text-amber-200 border-amber-400/40'
+                          : 'bg-white/10 text-stone-200 border-white/20'
+                      }`}>
+                        {EXAM_CATEGORIES[getExamCategoryId(selectedHistoryDetail.examCategory)].label}
                       </span>
                       <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full ${
                         selectedHistoryDetail.score >= passingScoreThreshold
@@ -5372,7 +5613,7 @@ service cloud.firestore {
                   </div>
 
                   <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-10 gap-2">
-                    {haccpQuestions.map(q => {
+                    {getQuestionsByCategory(selectedHistoryDetail.examCategory).map(q => {
                       const userAns = selectedHistoryDetail.answers?.[q.id];
                       const isCorrect = userAns === q.correctAnswer;
                       const isUnanswered = userAns === undefined;
@@ -5431,7 +5672,7 @@ service cloud.firestore {
                     </span>
                   </div>
 
-                  {haccpQuestions.map((q) => {
+                  {getQuestionsByCategory(selectedHistoryDetail.examCategory).map((q) => {
                     const userAns = selectedHistoryDetail.answers?.[q.id];
                     const isCorrect = userAns === q.correctAnswer;
                     const isUnanswered = userAns === undefined;
@@ -5603,7 +5844,9 @@ service cloud.firestore {
                 </div>
                 <div className="flex justify-between text-stone-600">
                   <span className="text-stone-400">응시 구분:</span>
-                  <span className="font-bold text-stone-800">{isReexamMode ? '2차 재시험' : '1차 정기 위생교육 평가'}</span>
+                  <span className="font-bold text-stone-800">
+                    {isReexamMode ? '2차 재시험' : selectedExamCategory === 'new_hire_2026_11' ? '1차 신입사원(11월) 위생교육 평가' : '1차 정기 위생교육 평가'}
+                  </span>
                 </div>
                 <div className="flex justify-between text-stone-600">
                   <span className="text-stone-400">답안 표기 문항:</span>
@@ -5661,8 +5904,42 @@ service cloud.firestore {
                   모바일 시험 응시용 QR코드
                 </h3>
                 <p className="text-xs text-stone-500 mt-1 max-w-sm leading-normal">
-                  스마트폰 카메라로 아래 QR코드를 스캔하면 성명·소속 입력 후 {new Date().getFullYear()}년도 HACCP 시험지로 즉시 이동합니다.
+                  스마트폰 카메라로 아래 QR코드를 스캔하면 성명·소속 입력 후 {qrExamCategory === 'new_hire_2026_11' ? '2026년 신입사원(11월)' : `${new Date().getFullYear()}년도 정기`} HACCP 시험지로 즉시 이동합니다.
                 </p>
+              </div>
+
+              {/* QR Exam Category Selector */}
+              <div className="flex items-center gap-1.5 bg-stone-100 p-1 rounded-xl border border-stone-200 text-xs">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQrExamCategory('regular');
+                    setQrUrl(getPublicShareUrl('regular'));
+                    setCopied(false);
+                  }}
+                  className={`flex-1 py-1.5 px-2.5 rounded-lg font-bold transition-all cursor-pointer ${
+                    qrExamCategory === 'regular'
+                      ? 'bg-[#0F5A3E] text-white shadow-2xs'
+                      : 'text-stone-600 hover:bg-white'
+                  }`}
+                >
+                  2026년도 정기평가
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQrExamCategory('new_hire_2026_11');
+                    setQrUrl(getPublicShareUrl('new_hire_2026_11'));
+                    setCopied(false);
+                  }}
+                  className={`flex-1 py-1.5 px-2.5 rounded-lg font-bold transition-all cursor-pointer ${
+                    qrExamCategory === 'new_hire_2026_11'
+                      ? 'bg-indigo-700 text-white shadow-2xs'
+                      : 'text-stone-600 hover:bg-white'
+                  }`}
+                >
+                  2026년 신입사원(11월)
+                </button>
               </div>
 
               {/* QR Image Container */}
@@ -5698,7 +5975,7 @@ service cloud.firestore {
                       type="button"
                       onClick={() => {
                         localStorage.removeItem("saved_custom_qr_url");
-                        setQrUrl("https://haccp-test.vercel.app");
+                        setQrUrl(getPublicShareUrl(qrExamCategory));
                       }}
                       className="text-[10px] font-bold text-[#0F5A3E] hover:text-emerald-900 underline cursor-pointer"
                       title="GitHub 연동 공식 도메인(https://haccp-test.vercel.app)으로 복원합니다"
@@ -5861,18 +6138,31 @@ service cloud.firestore {
               </div>
 
               {/* Controls bar inside modal */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-stone-50 p-3 rounded-xl border border-stone-200 text-xs">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-stone-50 p-3 rounded-xl border border-stone-200 text-xs">
                 {/* Year Select */}
                 <div className="flex items-center gap-2">
-                  <label className="font-bold text-stone-700 shrink-0">출력 연도 선택:</label>
+                  <label className="font-bold text-stone-700 shrink-0">출력 연도:</label>
                   <select
                     value={examPaperYear}
                     onChange={e => setExamPaperYear(e.target.value)}
                     className="flex-1 px-3 py-2 bg-white border border-stone-300 rounded-lg font-bold text-emerald-900 focus:ring-2 focus:ring-emerald-800 focus:outline-hidden cursor-pointer text-xs sm:text-sm"
                   >
                     {[2026].map(y => (
-                      <option key={y} value={y.toString()}>{y}년도 평가 시험지 (온라인 정식 시행)</option>
+                      <option key={y} value={y.toString()}>{y}년도 평가 시험지</option>
                     ))}
+                  </select>
+                </div>
+
+                {/* Exam Category Select */}
+                <div className="flex items-center gap-2">
+                  <label className="font-bold text-stone-700 shrink-0">과정 구분:</label>
+                  <select
+                    value={examPaperCategory}
+                    onChange={e => setExamPaperCategory(getExamCategoryId(e.target.value))}
+                    className="flex-1 px-3 py-2 bg-white border border-indigo-300 rounded-lg font-bold text-indigo-950 focus:ring-2 focus:ring-indigo-700 focus:outline-hidden cursor-pointer text-xs sm:text-sm"
+                  >
+                    <option value="regular">2026년도 정기 위생교육 평가</option>
+                    <option value="new_hire_2026_11">2026년 신입사원(11월)</option>
                   </select>
                 </div>
 
@@ -6092,7 +6382,7 @@ service cloud.firestore {
                       <h2 className={`font-bold text-stone-900 tracking-tight ${
                         examPreviewZoom === 'xxlarge' ? 'text-2xl sm:text-3xl' : examPreviewZoom === 'xlarge' ? 'text-xl sm:text-2xl' : 'text-lg sm:text-xl'
                       }`}>
-                        {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지
+                        {examPaperCategory === 'new_hire_2026_11' ? EXAM_CATEGORIES.new_hire_2026_11.paperTitle : `${examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지`}
                       </h2>
                       <p className="text-xs sm:text-sm text-stone-600 font-sans font-medium">
                         주관 부서: 품질보증팀 &nbsp;|&nbsp; {examPaperType === 'student' ? '[ 수험생 응시용 문제지 ]' : '[ 관리자용 정답 및 해설지 ]'}
@@ -6132,7 +6422,7 @@ service cloud.firestore {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
                       {/* Left Column: 1 ~ 5 */}
                       <div className="space-y-5 md:pr-4 md:border-r md:border-stone-200">
-                        {haccpQuestions.slice(0, 5).map((q, idx) => (
+                        {getQuestionsByCategory(examPaperCategory).slice(0, 5).map((q, idx) => (
                           <div key={q.id} className="space-y-2">
                             <p className={`font-bold text-stone-900 leading-snug ${
                               examPreviewZoom === 'xxlarge' 
@@ -6184,7 +6474,7 @@ service cloud.firestore {
 
                       {/* Right Column: 6 ~ 10 */}
                       <div className="space-y-5 md:pl-4">
-                        {haccpQuestions.slice(5, 10).map((q, idx) => (
+                        {getQuestionsByCategory(examPaperCategory).slice(5, 10).map((q, idx) => (
                           <div key={q.id} className="space-y-2">
                             <p className={`font-bold text-stone-900 leading-snug ${
                               examPreviewZoom === 'xxlarge' 
@@ -6261,7 +6551,7 @@ service cloud.firestore {
 
                     <div className="flex items-center justify-between border-b border-stone-800 pb-2 text-xs sm:text-sm font-sans">
                       <span className="font-bold text-stone-900">
-                        {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지 (제 2 면 - 뒷면)
+                        {examPaperCategory === 'new_hire_2026_11' ? EXAM_CATEGORIES.new_hire_2026_11.paperTitle : `${examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지`} (제 2 면 - 뒷면)
                       </span>
                       <span className="text-stone-600 font-medium">성명: ____________ &nbsp;&nbsp; 소속: ____________</span>
                     </div>
@@ -6270,7 +6560,7 @@ service cloud.firestore {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
                       {/* Left Column: 11 ~ 15 */}
                       <div className="space-y-5 md:pr-4 md:border-r md:border-stone-200">
-                        {haccpQuestions.slice(10, 15).map((q, idx) => (
+                        {getQuestionsByCategory(examPaperCategory).slice(10, 15).map((q, idx) => (
                           <div key={q.id} className="space-y-2">
                             <p className={`font-bold text-stone-900 leading-snug ${
                               examPreviewZoom === 'xxlarge' 
@@ -6322,7 +6612,7 @@ service cloud.firestore {
 
                       {/* Right Column: 16 ~ 20 */}
                       <div className="space-y-5 md:pl-4">
-                        {haccpQuestions.slice(15, 20).map((q, idx) => (
+                        {getQuestionsByCategory(examPaperCategory).slice(15, 20).map((q, idx) => (
                           <div key={q.id} className="space-y-2">
                             <p className={`font-bold text-stone-900 leading-snug ${
                               examPreviewZoom === 'xxlarge' 
@@ -6512,7 +6802,7 @@ service cloud.firestore {
               KOOKSOONDANG | 주식회사 국순당 횡성양조장
             </div>
             <h1 style={{ textAlign: 'center', fontSize: '14.5pt', fontWeight: 'bold', color: '#111827', marginBottom: '3px', lineHeight: 1.25, fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
-              {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지
+              {examPaperCategory === 'new_hire_2026_11' ? EXAM_CATEGORIES.new_hire_2026_11.paperTitle : `${examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지`}
             </h1>
             <p style={{ textAlign: 'center', fontSize: '8.5pt', color: '#4b5563', fontWeight: 'bold', marginBottom: '6px' }}>
               주관 부서: 품질보증팀 &nbsp;|&nbsp; {examPaperType === 'student' ? '[ 수험생 응시용 문제지 (제 1 면 - 앞면: 1~10번) ]' : '[ 관리자용 정답 및 해설지 (제 1 면 - 앞면: 1~10번) ]'}
@@ -6548,7 +6838,7 @@ service cloud.firestore {
               <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, width: '1px', background: '#d1d5db', transform: 'translateX(-50%)' }} />
               {/* Col 1: 1~5 */}
               <div style={{ paddingRight: '10px' }}>
-                {haccpQuestions.slice(0, 5).map((q, idx) => (
+                {getQuestionsByCategory(examPaperCategory).slice(0, 5).map((q, idx) => (
                   <div key={q.id} style={{ marginBottom: idx === 4 ? '0px' : (examPaperType === 'teacher' ? '10px' : '18px'), pageBreakInside: 'avoid', breakInside: 'avoid' }}>
                     <p style={{ fontSize: '9.8pt', fontWeight: 'bold', color: '#111827', lineHeight: 1.35, marginBottom: '3.5px' }}>
                       <span style={{ fontWeight: 'bold', marginRight: '3px' }}>{idx + 1}.</span> {q.text}
@@ -6582,7 +6872,7 @@ service cloud.firestore {
 
               {/* Col 2: 6~10 */}
               <div style={{ paddingLeft: '10px' }}>
-                {haccpQuestions.slice(5, 10).map((q, idx) => (
+                {getQuestionsByCategory(examPaperCategory).slice(5, 10).map((q, idx) => (
                   <div key={q.id} style={{ marginBottom: idx === 4 ? '0px' : (examPaperType === 'teacher' ? '10px' : '18px'), pageBreakInside: 'avoid', breakInside: 'avoid' }}>
                     <p style={{ fontSize: '9.8pt', fontWeight: 'bold', color: '#111827', lineHeight: 1.35, marginBottom: '3.5px' }}>
                       <span style={{ fontWeight: 'bold', marginRight: '3px' }}>{idx + 6}.</span> {q.text}
@@ -6626,7 +6916,7 @@ service cloud.firestore {
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1.5px solid #111827', paddingBottom: '3px', marginBottom: '12px', fontSize: '9.5pt', fontFamily: "'Malgun Gothic', '맑은 고딕', sans-serif" }}>
               <span style={{ fontWeight: 'bold', color: '#111827', fontSize: '10pt' }}>
-                {examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지 (제 2 면 - 뒷면: 11~20번)
+                {examPaperCategory === 'new_hire_2026_11' ? EXAM_CATEGORIES.new_hire_2026_11.paperTitle : `${examPaperYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지`} (제 2 면 - 뒷면: 11~20번)
               </span>
               <span style={{ color: '#374151', fontWeight: 'bold', fontSize: '8.5pt' }}>성명: ______________ &nbsp;&nbsp; 소속: ______________</span>
             </div>
@@ -6636,7 +6926,7 @@ service cloud.firestore {
               <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, width: '1px', background: '#d1d5db', transform: 'translateX(-50%)' }} />
               {/* Col 1: 11~15 */}
               <div style={{ paddingRight: '10px' }}>
-                {haccpQuestions.slice(10, 15).map((q, idx) => (
+                {getQuestionsByCategory(examPaperCategory).slice(10, 15).map((q, idx) => (
                   <div key={q.id} style={{ marginBottom: idx === 4 ? '0px' : (examPaperType === 'teacher' ? '12px' : '25px'), pageBreakInside: 'avoid', breakInside: 'avoid' }}>
                     <p style={{ fontSize: '9.8pt', fontWeight: 'bold', color: '#111827', lineHeight: 1.35, marginBottom: '3.5px' }}>
                       <span style={{ fontWeight: 'bold', marginRight: '3px' }}>{idx + 11}.</span> {q.text}
@@ -6670,7 +6960,7 @@ service cloud.firestore {
 
               {/* Col 2: 16~20 */}
               <div style={{ paddingLeft: '10px' }}>
-                {haccpQuestions.slice(15, 20).map((q, idx) => (
+                {getQuestionsByCategory(examPaperCategory).slice(15, 20).map((q, idx) => (
                   <div key={q.id} style={{ marginBottom: idx === 4 ? '0px' : (examPaperType === 'teacher' ? '12px' : '25px'), pageBreakInside: 'avoid', breakInside: 'avoid' }}>
                     <p style={{ fontSize: '9.8pt', fontWeight: 'bold', color: '#111827', lineHeight: 1.35, marginBottom: '3.5px' }}>
                       <span style={{ fontWeight: 'bold', marginRight: '3px' }}>{idx + 16}.</span> {q.text}
