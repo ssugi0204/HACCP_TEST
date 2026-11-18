@@ -260,6 +260,7 @@ export default function App() {
   const [examPreviewZoom, setExamPreviewZoom] = useState<'normal' | 'large' | 'xlarge' | 'xxlarge'>('large');
   const [isExamModalMaximized, setIsExamModalMaximized] = useState(false);
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [isGeneratingPersonPdf, setIsGeneratingPersonPdf] = useState(false);
 
   // QR Code 공유 모달 상태
   const [showQrModal, setShowQrModal] = useState(false);
@@ -2812,6 +2813,398 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  // 응시자 개인별 시험지 + 답안지 HTML 생성 헬퍼 (A4 양면 1장 / 2페이지: 1면 1~10번, 2면 11~20번)
+  const buildExamineeExamPagesHtml = (record: ExamHistory, isForPdf: boolean = false) => {
+    const escapeHtml = (val?: string | number) =>
+      String(val ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+
+    const catId = getExamCategoryId(record.examCategory);
+    const paperMeta = EXAM_CATEGORIES[catId];
+    const questions = getQuestionsByCategory(catId);
+    const examYear =
+      record.year ||
+      (record.date && /^\d{4}/.test(record.date) ? parseInt(record.date.slice(0, 4), 10) : new Date().getFullYear());
+    const paperTitleText =
+      catId === 'new_hire_2026_11'
+        ? paperMeta.paperTitle
+        : `${examYear}년도 HACCP 및 선행요건 정기 위생교육 평가 시험지`;
+    const roundText = record.round === 2 || record.isReexam ? '2차 재시험' : '1차 평가';
+
+    const getUserAns = (qId: number): number | undefined => {
+      const raw = record.answers?.[qId];
+      if (raw === undefined || raw === null) return undefined;
+      const num = Number(raw);
+      return Number.isFinite(num) && num >= 1 && num <= 5 ? num : undefined;
+    };
+
+    const actualCorrectCount = questions.reduce((acc, q) => acc + (getUserAns(q.id) === q.correctAnswer ? 1 : 0), 0);
+    const displayCorrectCount = record.answers && Object.keys(record.answers).length > 0
+      ? actualCorrectCount
+      : Math.round((record.score || 0) / 5);
+    const judgmentText =
+      record.score >= passingScoreThreshold
+        ? '합격'
+        : record.score >= 50
+          ? '재평가 대상'
+          : '재교육 + 재평가';
+    const judgmentColor =
+      record.score >= passingScoreThreshold
+        ? '#047857'
+        : record.score >= 50
+          ? '#b45309'
+          : '#b91c1c';
+
+    const circleChars = ['①', '②', '③', '④', '⑤'];
+
+    const renderOmrSummaryCells = (sliceQuestions: Question[]) =>
+      sliceQuestions
+        .map((q) => {
+          const userAns = getUserAns(q.id);
+          const isCorrect = userAns === q.correctAnswer;
+          const bg = userAns === undefined ? '#f3f4f6' : isCorrect ? '#ecfdf5' : '#fef2f2';
+          const color = userAns === undefined ? '#6b7280' : isCorrect ? '#047857' : '#dc2626';
+          return `
+            <td style="border: 1px solid #cbd5e1; padding: 2px 3px; text-align: center; background: ${bg}; font-size: 9px; line-height: 1.25;">
+              <div style="font-weight: bold; color: #374151;">${q.id}번</div>
+              <div style="font-weight: bold; color: ${color};">
+                ${userAns !== undefined ? `${userAns}` : '-'} ${isCorrect ? '○' : '×'}
+                <span style="color: #4b5563; font-weight: normal;">(${q.correctAnswer})</span>
+              </div>
+            </td>
+          `;
+        })
+        .join('');
+
+    const renderPersonQuestions = (sliceQuestions: Question[], startIndex: number) =>
+      sliceQuestions
+        .map((q, idx) => {
+          const num = startIndex + idx + 1;
+          const userAns = getUserAns(q.id);
+          const isCorrect = userAns === q.correctAnswer;
+          const isUnanswered = userAns === undefined;
+          const statusBadge = isUnanswered
+            ? `<span style="background: #e5e7eb; color: #374151; padding: 1px 4px; border-radius: 3px; font-size: 8.5px; font-weight: bold;">미응답 · 정답 ${circleChars[q.correctAnswer - 1]}</span>`
+            : isCorrect
+              ? `<span style="background: #d1fae5; color: #065f46; padding: 1px 4px; border-radius: 3px; font-size: 8.5px; font-weight: bold;">정답 (+5점)</span>`
+              : `<span style="background: #fee2e2; color: #991b1b; padding: 1px 4px; border-radius: 3px; font-size: 8.5px; font-weight: bold;">오답 · 선택 ${circleChars[userAns - 1]} / 정답 ${circleChars[q.correctAnswer - 1]}</span>`;
+
+          return `
+            <div style="margin-bottom: ${idx === 4 ? '0px' : '9px'}; padding-bottom: 4px; border-bottom: ${idx === 4 ? 'none' : '1px dashed #e5e7eb'}; page-break-inside: avoid; break-inside: avoid;">
+              <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 6px; margin-bottom: 3px;">
+                <div style="font-weight: bold; font-size: 10.5px; color: #111827; line-height: 1.32;">
+                  ${num}. ${escapeHtml(q.text)}
+                </div>
+                <div style="flex-shrink: 0; white-space: nowrap;">${statusBadge}</div>
+              </div>
+              ${q.context ? `
+                <div style="background: #f3f4f6; border: 1px solid #d1d5db; padding: 2px 5px; font-size: 9px; color: #374151; margin-bottom: 3px; line-height: 1.28;">
+                  ${escapeHtml(q.context)}
+                </div>
+              ` : ''}
+              <div style="padding-left: 2px; font-size: 9.6px; color: #1f2937; line-height: 1.3;">
+                ${q.options
+                  .map((opt, oIdx) => {
+                    const optNum = oIdx + 1;
+                    const isSelected = userAns === optNum;
+                    const isAnswer = q.correctAnswer === optNum;
+                    const rowBg = isAnswer
+                      ? '#ecfdf5'
+                      : isSelected
+                        ? '#fef2f2'
+                        : 'transparent';
+                    const rowColor = isAnswer
+                      ? '#065f46'
+                      : isSelected
+                        ? '#991b1b'
+                        : '#1f2937';
+                    const tag =
+                      isSelected && isAnswer
+                        ? '<b style="color: #047857; margin-left: 3px;">[응시자 선택 · 정답]</b>'
+                        : isAnswer
+                          ? '<b style="color: #047857; margin-left: 3px;">[정답]</b>'
+                          : isSelected
+                            ? '<b style="color: #dc2626; margin-left: 3px;">[응시자 선택]</b>'
+                            : '';
+                    return `
+                      <div style="display: flex; align-items: flex-start; gap: 4px; margin-bottom: 1.5px; padding: 1px 3px; border-radius: 2px; background: ${rowBg}; color: ${rowColor}; font-weight: ${isSelected || isAnswer ? '600' : 'normal'};">
+                        <span style="font-weight: bold; flex-shrink: 0;">${circleChars[oIdx] || `(${optNum})`}</span>
+                        <span style="word-break: break-word;">${escapeHtml(opt)}${tag}</span>
+                      </div>
+                    `;
+                  })
+                  .join('')}
+              </div>
+            </div>
+          `;
+        })
+        .join('');
+
+    const pageStyle = isForPdf
+      ? 'width: 794px; min-height: 1123px; padding: 18px 24px 14px 24px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; background: #ffffff; font-family: \'Malgun Gothic\', \'맑은 고딕\', \'Apple SD Gothic Neo\', sans-serif;'
+      : 'width: 100%; max-width: 194mm; min-height: 266mm; margin: 0 auto; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; page-break-after: always; break-after: page; page-break-inside: avoid; break-inside: avoid; background: #ffffff; font-family: \'Malgun Gothic\', \'맑은 고딕\', \'Apple SD Gothic Neo\', sans-serif;';
+
+    const page2Style = isForPdf
+      ? pageStyle
+      : 'width: 100%; max-width: 194mm; min-height: 266mm; margin: 0 auto; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; page-break-inside: avoid; break-inside: avoid; background: #ffffff; font-family: \'Malgun Gothic\', \'맑은 고딕\', \'Apple SD Gothic Neo\', sans-serif;';
+
+    return `
+      <!-- PAGE 1 (응시자 정보 + OMR 요약 + 1~10번) -->
+      <div id="person-pdf-page-1" class="print-page" style="${pageStyle}">
+        <div>
+          <div style="text-align: center; margin-bottom: 5px;">
+            <div style="font-size: 9.5px; font-weight: bold; letter-spacing: 1.8px; color: #4b5563; margin-bottom: 1px;">
+              KOOKSOONDANG | 주식회사 국순당 횡성양조장
+            </div>
+            <h1 style="font-size: 15.5px; font-weight: bold; margin: 0 0 2px 0; color: #111827;">
+              ${escapeHtml(paperTitleText)}
+            </h1>
+            <div style="font-size: 10px; color: #374151; font-weight: bold;">
+              주관 부서: 품질보증팀 &nbsp;|&nbsp; [ ${escapeHtml(roundText)} · 응시자 개인별 시험지 및 답안지 (제 1 면: 1~10번) ]
+            </div>
+          </div>
+
+          <table style="width: 100%; border-collapse: collapse; margin-bottom: 5px; font-size: 10px; text-align: center;">
+            <tbody>
+              <tr>
+                <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 3px 4px; font-weight: bold;" width="10%">소 속</th>
+                <td style="border: 1px solid #1f2937; padding: 3px 4px; font-weight: bold;" width="22%">${escapeHtml(record.dept || '미지정')}</td>
+                <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 3px 4px; font-weight: bold;" width="10%">성 명</th>
+                <td style="border: 1px solid #1f2937; padding: 3px 4px; font-weight: bold; font-size: 11px;" width="20%">${escapeHtml(record.name || '미기재')}</td>
+                <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 3px 4px; font-weight: bold;" width="12%">수험번호</th>
+                <td style="border: 1px solid #1f2937; padding: 3px 4px; font-family: monospace;" width="26%">${escapeHtml(record.idNo || '-')}</td>
+              </tr>
+              <tr>
+                <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 3px 4px; font-weight: bold;">응시일</th>
+                <td style="border: 1px solid #1f2937; padding: 3px 4px;">${escapeHtml(record.date || '-')}</td>
+                <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 3px 4px; font-weight: bold;">점 수</th>
+                <td style="border: 1px solid #1f2937; padding: 3px 4px; font-weight: bold;">${record.score}점 / 100점 (${displayCorrectCount}/20)</td>
+                <th style="border: 1px solid #1f2937; background: #f3f4f6; padding: 3px 4px; font-weight: bold;">판 정</th>
+                <td style="border: 1px solid #1f2937; padding: 3px 4px; font-weight: bold; color: ${judgmentColor};">${judgmentText} &nbsp;|&nbsp; 결재(담당/팀장)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <!-- 20문항 OMR 정오 요약표 -->
+          <table style="width: 100%; border-collapse: collapse; margin-bottom: 8px;">
+            <tbody>
+              <tr>${renderOmrSummaryCells(questions.slice(0, 10))}</tr>
+              <tr>${renderOmrSummaryCells(questions.slice(10, 20))}</tr>
+            </tbody>
+          </table>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; position: relative;">
+            <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #cbd5e1; transform: translateX(-50%);"></div>
+            <div style="padding-right: 8px;">
+              ${renderPersonQuestions(questions.slice(0, 5), 0)}
+            </div>
+            <div style="padding-left: 8px;">
+              ${renderPersonQuestions(questions.slice(5, 10), 5)}
+            </div>
+          </div>
+        </div>
+
+        <div style="border-top: 1px solid #cbd5e1; padding-top: 4px; margin-top: 4px; text-align: center; font-size: 9.5px; color: #4b5563; font-weight: bold;">
+          - 1 / 2 면 (${escapeHtml(record.name)} 님 개인 답안지 · 다음 면 11~20번) -
+        </div>
+      </div>
+
+      <!-- PAGE 2 (11~20번) -->
+      <div id="person-pdf-page-2" class="print-page" style="${page2Style}">
+        <div>
+          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1.5px solid #1f2937; padding-bottom: 4px; margin-bottom: 10px; font-size: 10px;">
+            <span style="font-weight: bold; font-size: 11px; color: #111827;">
+              ${escapeHtml(paperTitleText)} (${escapeHtml(roundText)} · 제 2 면: 11~20번)
+            </span>
+            <span style="font-weight: bold; color: #374151;">
+              성명: ${escapeHtml(record.name)} &nbsp;|&nbsp; 소속: ${escapeHtml(record.dept)} &nbsp;|&nbsp; 점수: ${record.score}점 (${judgmentText})
+            </span>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; position: relative;">
+            <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #cbd5e1; transform: translateX(-50%);"></div>
+            <div style="padding-right: 8px;">
+              ${renderPersonQuestions(questions.slice(10, 15), 10)}
+            </div>
+            <div style="padding-left: 8px;">
+              ${renderPersonQuestions(questions.slice(15, 20), 15)}
+            </div>
+          </div>
+
+          <div style="border: 1px solid #9ca3af; background: #f9fafb; padding: 5px 8px; text-align: center; font-size: 9.5px; color: #374151; margin-top: 10px;">
+            <b>[ 채점 결과 확인 ]</b> 응시자: <b>${escapeHtml(record.name)}</b> (${escapeHtml(record.dept)}) &nbsp;|&nbsp; 정답: <b>${displayCorrectCount}/20문항</b> &nbsp;|&nbsp; 최종 점수: <b>${record.score}점</b> &nbsp;|&nbsp; 판정: <b style="color: ${judgmentColor};">${judgmentText}</b>
+          </div>
+        </div>
+
+        <div style="border-top: 1px solid #cbd5e1; padding-top: 4px; margin-top: 4px; display: flex; justify-content: space-between; font-size: 9.5px; color: #4b5563; font-weight: bold;">
+          <span>주식회사 국순당 품질보증팀</span>
+          <span>- 2 / 2 면 (끝) -</span>
+          <span>HACCP 식품안전관리인증기준</span>
+        </div>
+      </div>
+    `;
+  };
+
+  // 응시자 개인별 시험지·답안지 인쇄 (iframe 인쇄)
+  const handlePrintExamineePaper = (record: ExamHistory) => {
+    try {
+      showAdminToast(`${record.name} 님의 시험지 및 답안지 인쇄 창을 준비합니다.`, "info");
+      const pagesHtml = buildExamineeExamPagesHtml(record, false);
+      const printStyles = `
+        @page {
+          size: A4 portrait;
+          margin: 6mm 8mm 6mm 8mm;
+        }
+        * {
+          box-sizing: border-box;
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }
+        html, body {
+          font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
+          background: #ffffff;
+          color: #111827;
+          margin: 0;
+          padding: 0;
+          width: 100%;
+        }
+        .print-page {
+          page-break-after: always;
+          break-after: page;
+        }
+        .print-page:last-child {
+          page-break-after: auto;
+          break-after: auto;
+        }
+      `;
+
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      document.body.appendChild(iframe);
+
+      const iframeDoc = iframe.contentWindow?.document || iframe.contentDocument;
+      if (iframeDoc && iframe.contentWindow) {
+        iframeDoc.open();
+        iframeDoc.write(`
+          <!DOCTYPE html>
+          <html lang="ko">
+          <head>
+            <meta charset="utf-8">
+            <title>${record.name}_${record.dept}_HACCP_시험지_답안지</title>
+            <style>${printStyles}</style>
+          </head>
+          <body>
+            ${pagesHtml}
+          </body>
+          </html>
+        `);
+        iframeDoc.close();
+
+        setTimeout(() => {
+          try {
+            iframe.contentWindow?.focus();
+            iframe.contentWindow?.print();
+          } catch (err) {
+            console.warn("Examinee iframe print failed:", err);
+            showAdminToast("브라우저 인쇄 호출에 실패했습니다. PDF 저장 버튼을 이용해 주세요.", "error");
+          } finally {
+            setTimeout(() => {
+              if (document.body.contains(iframe)) {
+                document.body.removeChild(iframe);
+              }
+            }, 3000);
+          }
+        }, 300);
+        return;
+      }
+    } catch (err) {
+      console.error("Print examinee paper error:", err);
+      showAdminToast("인쇄 준비 중 오류가 발생했습니다. PDF 저장을 이용해 주세요.", "error");
+    }
+  };
+
+  // 응시자 개인별 시험지·답안지 PDF 파일 다운로드
+  const handleDownloadExamineePdf = async (record: ExamHistory) => {
+    try {
+      setIsGeneratingPersonPdf(true);
+      showAdminToast(`${record.name} 님의 시험지 및 답안지 PDF를 생성 중입니다...`, "info");
+
+      const container = document.createElement("div");
+      container.style.position = "fixed";
+      container.style.left = "-9999px";
+      container.style.top = "0";
+      container.style.width = "794px";
+      container.style.backgroundColor = "#ffffff";
+      container.style.color = "#111827";
+      container.style.boxSizing = "border-box";
+      container.innerHTML = buildExamineeExamPagesHtml(record, true);
+      document.body.appendChild(container);
+
+      const page1El = container.querySelector("#person-pdf-page-1") as HTMLElement;
+      const page2El = container.querySelector("#person-pdf-page-2") as HTMLElement;
+
+      const canvas1 = await html2canvas(page1El, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+        logging: false
+      });
+
+      const canvas2 = await html2canvas(page2El, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+        logging: false
+      });
+
+      document.body.removeChild(container);
+
+      const pdf = new jsPDF({
+        orientation: "portrait",
+        unit: "mm",
+        format: "a4"
+      });
+
+      const addFittedPage = (canvas: HTMLCanvasElement, isFirst: boolean) => {
+        if (!isFirst) pdf.addPage();
+        const pageW = 210;
+        const pageH = 297;
+        const imgRatio = canvas.width / canvas.height;
+        let renderW = pageW;
+        let renderH = pageW / imgRatio;
+        if (renderH > pageH) {
+          renderH = pageH;
+          renderW = pageH * imgRatio;
+        }
+        const offsetX = (pageW - renderW) / 2;
+        pdf.addImage(canvas.toDataURL("image/jpeg", 0.95), "JPEG", offsetX, 0, renderW, renderH);
+      };
+
+      addFittedPage(canvas1, true);
+      addFittedPage(canvas2, false);
+
+      const safeRound = record.round === 2 || record.isReexam ? '2차재시험' : '1차평가';
+      const safeDate = (record.date || getTodayDateString()).replace(/[^0-9-]/g, '');
+      const fileName = `${safeDate}_${record.name}_${record.dept}_${safeRound}_HACCP_시험지_답안지.pdf`;
+      pdf.save(fileName);
+      showAdminToast(`${record.name} 님의 시험지 및 답안지 PDF 저장이 완료되었습니다.`, "success");
+    } catch (err) {
+      console.error("Examinee PDF generation failed:", err);
+      showAdminToast("PDF 생성 중 오류가 발생했습니다. 인쇄 기능을 이용해 주세요.", "error");
+    } finally {
+      setIsGeneratingPersonPdf(false);
+    }
+  };
+
   const handleExitExam = () => {
     setIsExamStarted(false);
     setIsSubmitted(false);
@@ -3550,14 +3943,35 @@ service cloud.firestore {
                                   </div>
 
                                   {has1st && (
-                                    <button
-                                      type="button"
-                                      onClick={() => setSelectedHistoryDetail(person.firstExam!)}
-                                      className="w-full py-2 bg-stone-50 hover:bg-emerald-50 border border-stone-250 hover:border-emerald-300 text-stone-700 hover:text-emerald-900 text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs active:scale-98"
-                                    >
-                                      <FileCheck size={14} className="text-emerald-700" />
-                                      1차 시험 OMR 답안 및 문항 확인
-                                    </button>
+                                    <div className="flex items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => setSelectedHistoryDetail(person.firstExam!)}
+                                        className="flex-1 py-2 px-2.5 bg-stone-50 hover:bg-emerald-50 border border-stone-250 hover:border-emerald-300 text-stone-700 hover:text-emerald-900 text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs active:scale-98"
+                                      >
+                                        <FileCheck size={14} className="text-emerald-700 shrink-0" />
+                                        <span className="truncate">1차 OMR 답안 확인</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handlePrintExamineePaper(person.firstExam!)}
+                                        className="py-2 px-2.5 bg-stone-800 hover:bg-stone-900 text-white text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer shadow-2xs shrink-0"
+                                        title="1차 시험지 및 응시자 답안 인쇄"
+                                      >
+                                        <Printer size={13} />
+                                        인쇄
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={isGeneratingPersonPdf}
+                                        onClick={() => handleDownloadExamineePdf(person.firstExam!)}
+                                        className="py-2 px-2.5 bg-[#0F5A3E] hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer shadow-2xs shrink-0"
+                                        title="1차 시험지 및 응시자 답안 PDF 저장"
+                                      >
+                                        <Download size={13} />
+                                        PDF
+                                      </button>
+                                    </div>
                                   )}
                                 </div>
 
@@ -3730,14 +4144,35 @@ service cloud.firestore {
                                   </div>
 
                                   {has2nd && (
-                                    <button
-                                      type="button"
-                                      onClick={() => setSelectedHistoryDetail(person.secondExam!)}
-                                      className="w-full py-2 bg-stone-50 hover:bg-indigo-50 border border-stone-250 hover:border-indigo-300 text-stone-700 hover:text-indigo-900 text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs active:scale-98"
-                                    >
-                                      <FileCheck size={14} className="text-indigo-600" />
-                                      2차 재시험 OMR 답안 및 문항 확인
-                                    </button>
+                                    <div className="flex items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => setSelectedHistoryDetail(person.secondExam!)}
+                                        className="flex-1 py-2 px-2.5 bg-stone-50 hover:bg-indigo-50 border border-stone-250 hover:border-indigo-300 text-stone-700 hover:text-indigo-900 text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs active:scale-98"
+                                      >
+                                        <FileCheck size={14} className="text-indigo-600 shrink-0" />
+                                        <span className="truncate">2차 OMR 답안 확인</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handlePrintExamineePaper(person.secondExam!)}
+                                        className="py-2 px-2.5 bg-stone-800 hover:bg-stone-900 text-white text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer shadow-2xs shrink-0"
+                                        title="2차 재시험 시험지 및 응시자 답안 인쇄"
+                                      >
+                                        <Printer size={13} />
+                                        인쇄
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={isGeneratingPersonPdf}
+                                        onClick={() => handleDownloadExamineePdf(person.secondExam!)}
+                                        className="py-2 px-2.5 bg-indigo-700 hover:bg-indigo-800 disabled:opacity-50 text-white text-xs font-semibold rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer shadow-2xs shrink-0"
+                                        title="2차 재시험 시험지 및 응시자 답안 PDF 저장"
+                                      >
+                                        <Download size={13} />
+                                        PDF
+                                      </button>
+                                    </div>
                                   )}
                                 </div>
                               </div>
@@ -3955,6 +4390,25 @@ service cloud.firestore {
                                 >
                                   <FileCheck size={13} className="text-emerald-700" />
                                   전체 OMR 답안 및 문항 상세 확인
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handlePrintExamineePaper(record)}
+                                  className="px-2.5 py-1 bg-stone-800 hover:bg-stone-900 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1 cursor-pointer shadow-2xs"
+                                  title="해당 응시자의 시험지 및 답안 인쇄"
+                                >
+                                  <Printer size={13} />
+                                  시험지·답안 인쇄
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isGeneratingPersonPdf}
+                                  onClick={() => handleDownloadExamineePdf(record)}
+                                  className="px-2.5 py-1 bg-[#0F5A3E] hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1 cursor-pointer shadow-2xs"
+                                  title="해당 응시자의 시험지 및 답안 PDF 저장"
+                                >
+                                  <Download size={13} />
+                                  PDF 저장
                                 </button>
                               </div>
                             </div>
@@ -5543,14 +5997,35 @@ service cloud.firestore {
                   </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => setSelectedHistoryDetail(null)}
-                  className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-stone-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
-                  title="닫기"
-                >
-                  <X size={20} />
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handlePrintExamineePaper(selectedHistoryDetail)}
+                    className="px-3 py-1.5 bg-white/15 hover:bg-white/25 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+                    title="해당 응시자의 시험지 및 답안 인쇄"
+                  >
+                    <Printer size={14} />
+                    <span className="hidden sm:inline">인쇄</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isGeneratingPersonPdf}
+                    onClick={() => handleDownloadExamineePdf(selectedHistoryDetail)}
+                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+                    title="해당 응시자의 시험지 및 답안 PDF 저장"
+                  >
+                    {isGeneratingPersonPdf ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                    <span className="hidden sm:inline">PDF</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedHistoryDetail(null)}
+                    className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-stone-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                    title="닫기"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
               </div>
 
               {/* Modal Body: Scrollable */}
@@ -5755,17 +6230,43 @@ service cloud.firestore {
               </div>
 
               {/* Modal Footer */}
-              <div className="p-4 bg-white border-t border-stone-200 flex items-center justify-between gap-4 shrink-0">
+              <div className="p-4 bg-white border-t border-stone-200 flex flex-wrap items-center justify-between gap-3 shrink-0">
                 <div className="text-xs text-stone-500 font-sans hidden sm:block">
-                  ※ 인쇄가 필요하신 경우 상단 시험지 인쇄 기능을 활용하실 수 있습니다.
+                  ※ 해당 응시자의 시험지(20문항), 선택 답안, 실제 정답 및 채점 결과를 A4 2면 양식으로 출력·저장할 수 있습니다.
                 </div>
-                <div className="flex items-center gap-2 ml-auto">
+                <div className="flex items-center gap-2 ml-auto flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => handlePrintExamineePaper(selectedHistoryDetail)}
+                    className="px-4 py-2.5 bg-stone-800 hover:bg-stone-900 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Printer size={14} />
+                    시험지·답안 인쇄
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isGeneratingPersonPdf}
+                    onClick={() => handleDownloadExamineePdf(selectedHistoryDetail)}
+                    className="px-4 py-2.5 bg-[#0F5A3E] hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {isGeneratingPersonPdf ? (
+                      <>
+                        <Loader2 size={14} className="animate-spin" />
+                        PDF 생성 중...
+                      </>
+                    ) : (
+                      <>
+                        <Download size={14} />
+                        PDF 저장
+                      </>
+                    )}
+                  </button>
                   <button
                     type="button"
                     onClick={() => setSelectedHistoryDetail(null)}
-                    className="px-5 py-2.5 bg-stone-900 hover:bg-stone-800 text-white text-xs font-bold rounded-xl transition-all shadow-xs cursor-pointer"
+                    className="px-5 py-2.5 bg-stone-200 hover:bg-stone-300 text-stone-800 text-xs font-bold rounded-xl transition-all cursor-pointer"
                   >
-                    확인 및 닫기
+                    닫기
                   </button>
                 </div>
               </div>
