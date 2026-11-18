@@ -3049,86 +3049,96 @@ export default function App() {
     `;
   };
 
-  // 응시자 개인별 시험지·답안지 인쇄 (iframe 인쇄)
+  // 응시자 개인별 시험지·답안지 인쇄 (동기 window.print + body 직속 전용 인쇄 포털)
   const handlePrintExamineePaper = (record: ExamHistory) => {
+    const portalId = "examinee-print-portal";
+    const styleId = "examinee-print-style";
+
+    const cleanup = () => {
+      const existingPortal = document.getElementById(portalId);
+      if (existingPortal) existingPortal.remove();
+      const existingStyle = document.getElementById(styleId);
+      if (existingStyle) existingStyle.remove();
+    };
+
     try {
-      showAdminToast(`${record.name} 님의 시험지 및 답안지 인쇄 창을 준비합니다.`, "info");
+      cleanup();
+
       const pagesHtml = buildExamineeExamPagesHtml(record, false);
-      const printStyles = `
-        @page {
-          size: A4 portrait;
-          margin: 6mm 8mm 6mm 8mm;
+      const prevTitle = document.title;
+      document.title = `${record.name || "응시자"}_${record.dept || "부서"}_HACCP_시험지_답안지`;
+
+      const styleEl = document.createElement("style");
+      styleEl.id = styleId;
+      styleEl.textContent = `
+        @media screen {
+          #${portalId} {
+            display: none !important;
+          }
         }
-        * {
-          box-sizing: border-box;
-          -webkit-print-color-adjust: exact !important;
-          print-color-adjust: exact !important;
-        }
-        html, body {
-          font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif;
-          background: #ffffff;
-          color: #111827;
-          margin: 0;
-          padding: 0;
-          width: 100%;
-        }
-        .print-page {
-          page-break-after: always;
-          break-after: page;
-        }
-        .print-page:last-child {
-          page-break-after: auto;
-          break-after: auto;
+        @media print {
+          @page {
+            size: A4 portrait;
+            margin: 6mm 8mm 6mm 8mm;
+          }
+          html, body {
+            background: #ffffff !important;
+            color: #111827 !important;
+            font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            width: 100% !important;
+            height: auto !important;
+            overflow: visible !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+          body > *:not(#${portalId}) {
+            display: none !important;
+          }
+          #${portalId} {
+            display: block !important;
+            position: static !important;
+            width: 100% !important;
+            background: #ffffff !important;
+            color: #111827 !important;
+            font-family: 'Malgun Gothic', '맑은 고딕', 'Apple SD Gothic Neo', sans-serif !important;
+          }
+          #${portalId} .print-page {
+            min-height: 248mm !important;
+            page-break-after: always !important;
+            break-after: page !important;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
+          #${portalId} .print-page:last-child {
+            page-break-after: auto !important;
+            break-after: auto !important;
+          }
         }
       `;
 
-      const iframe = document.createElement('iframe');
-      iframe.style.position = 'fixed';
-      iframe.style.right = '0';
-      iframe.style.bottom = '0';
-      iframe.style.width = '0';
-      iframe.style.height = '0';
-      iframe.style.border = '0';
-      document.body.appendChild(iframe);
+      const portalEl = document.createElement("div");
+      portalEl.id = portalId;
+      portalEl.innerHTML = pagesHtml;
 
-      const iframeDoc = iframe.contentWindow?.document || iframe.contentDocument;
-      if (iframeDoc && iframe.contentWindow) {
-        iframeDoc.open();
-        iframeDoc.write(`
-          <!DOCTYPE html>
-          <html lang="ko">
-          <head>
-            <meta charset="utf-8">
-            <title>${record.name}_${record.dept}_HACCP_시험지_답안지</title>
-            <style>${printStyles}</style>
-          </head>
-          <body>
-            ${pagesHtml}
-          </body>
-          </html>
-        `);
-        iframeDoc.close();
+      document.head.appendChild(styleEl);
+      document.body.appendChild(portalEl);
 
-        setTimeout(() => {
-          try {
-            iframe.contentWindow?.focus();
-            iframe.contentWindow?.print();
-          } catch (err) {
-            console.warn("Examinee iframe print failed:", err);
-            showAdminToast("브라우저 인쇄 호출에 실패했습니다. PDF 저장 버튼을 이용해 주세요.", "error");
-          } finally {
-            setTimeout(() => {
-              if (document.body.contains(iframe)) {
-                document.body.removeChild(iframe);
-              }
-            }, 3000);
-          }
-        }, 300);
-        return;
-      }
+      const handleAfterPrint = () => {
+        document.title = prevTitle;
+        cleanup();
+      };
+
+      window.addEventListener("afterprint", handleAfterPrint, { once: true });
+      setTimeout(handleAfterPrint, 60000);
+
+      window.focus();
+      window.print();
     } catch (err) {
       console.error("Print examinee paper error:", err);
-      showAdminToast("인쇄 준비 중 오류가 발생했습니다. PDF 저장을 이용해 주세요.", "error");
+      cleanup();
+      showAdminToast("인쇄 창 호출 중 오류가 발생했습니다. 옆의 PDF 저장 버튼을 이용해 주세요.", "error");
     }
   };
 
